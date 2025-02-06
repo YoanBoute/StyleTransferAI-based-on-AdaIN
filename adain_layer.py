@@ -9,10 +9,6 @@ from keras import ops
 class AdaINLayer(Layer) :
     def __init__(self) :
         super().__init__()
-    
-    # The AdaIN layer has no trainable weight, so it doesn't need to be built
-    def build(self, input_shape) :
-        pass
 
     def call(self, inputs) :
         content_input = inputs[0]

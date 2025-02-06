@@ -19,8 +19,5 @@ class VGGEncoder(Layer) :
                 
         self.encoder = keras.Sequential(basis_vgg.layers[:13])
 
-    def build(self, input_shape) :
-        pass
-
     def call(self, inputs) :
         return self.encoder(inputs)
