@@ -1,10 +1,36 @@
 import numpy as np
+import torch
 
 import os
 os.environ["KERAS_BACKEND"] = "torch"
 import keras
-from keras.layers import Layer
-from keras import ops, Model
+from keras.layers import Layer # type: ignore
+from keras import ops, Model, Loss
+
+
+def instance_mean(batch) :
+    shape = batch.shape
+    match len(shape) :
+        case 4 :
+            pass
+        case 3 :
+            batch = batch.unsqueeze(0)
+        case _ :
+            raise ValueError("Incorrect shape for the provided batch. Expected a 3- or 4-dimensional Tensor.")
+    
+    return ops.mean(batch, [2,3], keepdims=True)
+
+def instance_std(batch) :
+    shape = batch.shape
+    match len(shape) :
+        case 4 :
+            pass
+        case 3 :
+            batch = batch.unsqueeze(0)
+        case _ :
+            raise ValueError("Incorrect shape for the provided batch. Expected a 3- or 4-dimensional Tensor.")
+    
+    return ops.std(batch, [2,3], keepdims=True)
 
 
 class VGGEncoder(Layer) :
@@ -19,12 +45,27 @@ class VGGEncoder(Layer) :
             name="vgg19"
         )
 
-        # As described in the AdaIN paper, the encoder is the VGG19 network up to the relu4_1 layer        
-        self.encoder = keras.Sequential(basis_vgg.layers[:13])
-        self.encoder.trainable = False
+        # The network is subdivided to have access to the features of different depths (for the style loss computation especially)
+        self.relu1_1 = keras.Sequential(basis_vgg.layers[:2])
+        self.relu2_1 = keras.Sequential(basis_vgg.layers[2:5])
+        self.relu3_1 = keras.Sequential(basis_vgg.layers[5:8])        
+        self.relu4_1 = keras.Sequential(basis_vgg.layers[8:13]) # As described in the AdaIN paper, the encoder is the VGG19 network up to the relu4_1 layer
+        
+        self.relu1_1.trainable = False
+        self.relu2_1.trainable = False
+        self.relu3_1.trainable = False
+        self.relu4_1.trainable = False
 
-    def call(self, inputs) :
-        return self.encoder(inputs)
+    def call(self, inputs, training=False) :
+        relu1_features = self.relu1_1(inputs)
+        relu2_features = self.relu2_1(relu1_features)
+        relu3_features = self.relu3_1(relu2_features)
+        relu4_features = self.relu4_1(relu3_features)
+
+        if training :
+            return relu1_features, relu2_features, relu3_features, relu4_features
+        else :
+            return relu4_features # During inference, only the final features are needed
     
 
 class AdaINLayer(Layer) :
@@ -36,32 +77,7 @@ class AdaINLayer(Layer) :
         # content_input = inputs[0]
         # style_input = inputs[1]
 
-        return self.instance_std(style_input) * ((content_input - self.instance_mean(content_input)) / self.instance_std(content_input)) + self.instance_mean(style_input)
-
-
-    def instance_mean(self, batch) :
-        shape = batch.shape
-        match len(shape) :
-            case 4 :
-                pass
-            case 3 :
-                batch = batch.unsqueeze(0)
-            case _ :
-                raise ValueError("Incorrect shape for the provided batch. Expected a 3- or 4-dimensional Tensor.")
-        
-        return ops.mean(batch, [2,3], keepdims=True)
-
-    def instance_std(self, batch) :
-        shape = batch.shape
-        match len(shape) :
-            case 4 :
-                pass
-            case 3 :
-                batch = batch.unsqueeze(0)
-            case _ :
-                raise ValueError("Incorrect shape for the provided batch. Expected a 3- or 4-dimensional Tensor.")
-        
-        return ops.std(batch, [2,3], keepdims=True)
+        return instance_std(style_input) * ((content_input - instance_mean(content_input)) / instance_std(content_input)) + instance_mean(style_input)
 
 
 class ReflectiveConv2D(keras.layers.Conv2D) :
@@ -109,11 +125,69 @@ class AdaINModel(Model) :
         content = inputs[0]
         style = inputs[1]
         resized_style = keras.layers.Resizing(content.shape[1], content.shape[2])(style) # To be combined in AdaIN layer, content and style image must have the same initial size
-        encoded_content = self.encoder(content)
-        encoded_style = self.encoder(resized_style)
+        
+        if training :
+            encoded_content = self.encoder(content, training=True)[-1] 
+            style_full_features = self.encoder(resized_style, training=True)
+            encoded_style = style_full_features[-1]
+        else :
+            encoded_content = self.encoder(content)
+            encoded_style = self.encoder(resized_style)
+
         combined_features = self.ada_in(encoded_content, encoded_style)
         decoded_img = self.decoder(combined_features)
+        
         if training :
-            return decoded_img, encoded_style, combined_features # During training, the result of the style encoding and of the AdaIN layer are necessary for the loss computation
+            gen_image_full_features = self.encoder(decoded_img, training=True)
+            return gen_image_full_features, style_full_features, combined_features # During training, the generated image is not important, but its features are for the loss computation
         else :
             return decoded_img 
+
+
+class AdaINLoss(Loss) :
+    def __init__(self, lamb, name=None, reduction="sum_over_batch_size", dtype=None):
+        """The custom loss function defined in the AdaIN paper
+
+        Args:
+            lamb (float): Relative weighing of the style loss wrt the content loss
+        """
+        super().__init__(name, reduction, dtype)
+        self.lamb = lamb
+    
+    def content_loss(self, generated_features, adain_output) :
+        """Compute the euclidean distance between the features of the generated image and the output of the AdaIN layer
+
+        Args:
+            generated_features (Tensor): Result of the encoding of the generated image through the VGG19-encoder
+            adain_output (Tensor): Output of the AdaIN layer, i.e features of the content image renormalized with style statistics
+
+        Returns:
+            Tensor: The euclidean distance (or 2-norm) between the two tensors
+        """
+        return torch.cdist(generated_features, adain_output, p=2.0)
+
+    def style_loss(self, generated_full_features, style_full_features) :
+        """Compute the style loss by computing euclidean distances between basis statistics from features of the generated image and the style image
+
+        Args:
+            generated_full_features (Tensor): Result of the encoding of the generated image (Computed for each first ReLU of VGG blocks)
+            style_full_features (Tensor): Result of the encoding of the style image (Computed for each first ReLU of VGG blocks)
+
+        Returns:
+            Tensor: The accumulation of euclidean distances between statistics
+        """
+        style_loss = 0
+        for layer in enumerate(generated_full_features) :
+            gen_mean = instance_mean(generated_full_features[layer])
+            gen_std = instance_std(generated_full_features[layer])
+            style_mean = instance_mean(style_full_features[layer])
+            style_std = instance_std(style_full_features[layer])
+
+            style_loss += torch.cdist(gen_mean, style_mean, p=2.0) + torch.cdist(gen_std, style_std, p=2.0)
+        
+        return style_loss
+    
+    def call(self, y_pred, y_true) :
+        (generated_full_features, style_full_features, adain_output) = y_pred
+        generated_features = generated_full_features[-1]
+        return self.content_loss(generated_features, adain_output) + self.lamb * self.style_loss(generated_full_features, style_full_features)
