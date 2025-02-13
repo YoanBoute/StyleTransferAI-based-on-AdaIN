@@ -1,4 +1,4 @@
-import torch
+from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import matplotlib.pyplot as plt
 import os
@@ -6,7 +6,30 @@ from sklearn.model_selection import train_test_split
 from torchvision import transforms
 
 os.environ["KERAS_BACKEND"] = "torch"
+import keras
 from pathlib import Path
+
+
+class AdaINDataset(Dataset) :
+    def __init__(self, files_list, transform_pipeline) :
+        super().__init__()
+        self.files_list = files_list
+        self.transform_pipeline = transform_pipeline
+
+    def __len__(self) :
+        return len(self.files_list)
+    
+    def __getitem__(self, index):
+        content_file, style_file = self.files_list[index]
+
+        # Loading the images only when required prevents from having to load the whole dataset at once, which would break the system
+        content_img = keras.utils.load_img(content_file)
+        style_img = keras.utils.load_img(style_file)
+
+        content_tensor = self.transform_pipeline(content_img)
+        style_tensor = self.transform_pipeline(style_img)
+
+        return content_tensor, style_tensor
 
 
 class AdaINDataModule() :
@@ -16,9 +39,7 @@ class AdaINDataModule() :
             style_img_dir, *,
             iterate_subdirs = True, 
             imgs_size = 512, 
-            keep_aspect_ratio = True, 
             crop_window_size = (256,256), 
-            # num_crops_per_img = 3,
             dataset_size = 80000, 
             train_val_test_split = (0.8, 0.1, 0.1),
             batch_size = 8,
@@ -31,10 +52,8 @@ class AdaINDataModule() :
         self.style_img_dir = style_img_dir
         self.iterate_subdirs = iterate_subdirs
 
-        self.keep_aspect_ratio = keep_aspect_ratio
         self.imgs_size = imgs_size
         self.crop_window_size = crop_window_size
-        # self.num_crops_per_img = num_crops_per_img
 
         self.dataset_size = dataset_size
         self.train_val_test_split = train_val_test_split
@@ -90,9 +109,9 @@ class AdaINDataModule() :
 
         content_files = np.array(content_files)
         style_files = np.array(style_files)
-        train_images = zip(content_files[train_indices], style_files[train_indices])
-        val_images = zip(content_files[val_indices], style_files[val_indices])
-        test_images = zip(content_files[test_indices], style_files[test_indices])
+        train_images = np.column_stack(content_files[train_indices], style_files[train_indices])
+        val_images = np.column_stack(content_files[val_indices], style_files[val_indices])
+        test_images = np.column_stack(content_files[test_indices], style_files[test_indices])
 
         transform_pipeline = transforms.Compose(
             transforms.Resize(self.imgs_size),
@@ -104,34 +123,17 @@ class AdaINDataModule() :
         self._val_dataset = AdaINDataset(val_images, transform_pipeline)
         self._test_dataset = AdaINDataset(test_images, transform_pipeline)
         
-        self._are_datasets_created = True
-        
-    
-    def train_dataset(self) :
-        if self._train_dataset is None :
-            self.create_datasets()
-        return self._train_dataset
-    
-    def val_dataset(self) :
-        if self._val_dataset is None :
-            self.create_datasets()
-        return self._val_dataset
-    
-    def test_dataset(self) :
-        if self._test_dataset is None :
-            self.create_datasets()
-        return self._test_dataset
-    
+        self._are_datasets_created = True    
 
     def train_dataloader(self) :
-        pass
+        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=False) # No need to shuffle here as the datasets are already shuffled (if self.shuffle is enabled)
 
     def val_dataloader(self) :
-        pass
+        return DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False) # No need to shuffle here as the datasets are already shuffled (if self.shuffle is enabled)
 
     def test_dataloader(self) :
-        pass
-    
+        return DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False) # No need to shuffle here as the datasets are already shuffled (if self.shuffle is enabled)
+
 
     @property
     def are_datasets_created(self) :
@@ -139,4 +141,37 @@ class AdaINDataModule() :
     
     @are_datasets_created.setter
     def are_datasets_created(self, new_value) :
+        raise AttributeError("This is a private attribute that should not be modified outside of the class")
+    
+        
+    @property
+    def train_dataset(self) :
+        if self._train_dataset is None :
+            self.create_datasets()
+        return self._train_dataset
+    
+    @train_dataset.setter
+    def train_dataset(self, new_value) :
+        raise AttributeError("This is a private attribute that should not be modified outside of the class")
+    
+
+    @property
+    def val_dataset(self) :
+        if self._val_dataset is None :
+            self.create_datasets()
+        return self._val_dataset
+    
+    @val_dataset.setter
+    def val_dataset(self, new_value) :
+        raise AttributeError("This is a private attribute that should not be modified outside of the class")
+    
+    
+    @property
+    def test_dataset(self) :
+        if self._test_dataset is None :
+            self.create_datasets()
+        return self._test_dataset
+
+    @test_dataset.setter
+    def test_dataset(self, new_value) :
         raise AttributeError("This is a private attribute that should not be modified outside of the class")
