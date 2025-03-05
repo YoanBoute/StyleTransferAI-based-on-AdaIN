@@ -7,7 +7,6 @@ import keras
 from keras.layers import Layer # type: ignore
 from keras import ops, Model, Loss
 
-
 def instance_mean(batch) :
     shape = batch.shape
     match len(shape) :
@@ -18,7 +17,7 @@ def instance_mean(batch) :
         case _ :
             raise ValueError("Incorrect shape for the provided batch. Expected a 3- or 4-dimensional Tensor.")
     
-    return ops.mean(batch, [2,3], keepdims=True)
+    return batch.mean(axis=[1,2], keepdims=True)
 
 def instance_std(batch) :
     shape = batch.shape
@@ -30,7 +29,7 @@ def instance_std(batch) :
         case _ :
             raise ValueError("Incorrect shape for the provided batch. Expected a 3- or 4-dimensional Tensor.")
     
-    return ops.std(batch, [2,3], keepdims=True)
+    return batch.std(axis=[1,2], keepdims=True) + 1e-6 # Constant added for numerical stability
 
 
 class VGGEncoder(Layer) :
@@ -56,13 +55,13 @@ class VGGEncoder(Layer) :
         self.relu3_1.trainable = False
         self.relu4_1.trainable = False
 
-    def call(self, inputs, training=False) :
+    def call(self, inputs, all_features=False) :
         relu1_features = self.relu1_1(inputs)
         relu2_features = self.relu2_1(relu1_features)
         relu3_features = self.relu3_1(relu2_features)
         relu4_features = self.relu4_1(relu3_features)
 
-        if training :
+        if all_features :
             return relu1_features, relu2_features, relu3_features, relu4_features
         else :
             return relu4_features # During inference, only the final features are needed
@@ -71,13 +70,9 @@ class VGGEncoder(Layer) :
 class AdaINLayer(Layer) :
     def __init__(self) :
         super().__init__()
-        self.trainable = False
 
     def call(self, content_input, style_input) :
-        # content_input = inputs[0]
-        # style_input = inputs[1]
-
-        return instance_std(style_input) * ((content_input - instance_mean(content_input)) / instance_std(content_input)) + instance_mean(style_input)
+       return instance_std(style_input) * ((content_input - instance_mean(content_input)) / instance_std(content_input)) + instance_mean(style_input)
 
 
 class ReflectiveConv2D(keras.layers.Conv2D) :
@@ -115,45 +110,61 @@ class VGGDecoder(Layer) :
     
 
 class AdaINModel(Model) :
-    def __init__(self, *args, **kwargs):
+    def __init__(self, lamb = 1.0, loss_reduction = "sum_over_batch_size", *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.encoder = VGGEncoder()
-        self.ada_in = AdaINLayer()
-        self.decoder = VGGDecoder()
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.to(self.device)
+
+        self.encoder = VGGEncoder().to(self.device)
+        self.ada_in = AdaINLayer().to(self.device)
+        self.decoder = VGGDecoder().to(self.device)
+
+        self.loss_ = AdaINLoss(lamb=lamb, reduction=loss_reduction)
+
+        self.built = True
+
     
     def call(self, inputs, training=False):
-        content = inputs[0]
-        style = inputs[1]
-        resized_style = keras.layers.Resizing(content.shape[1], content.shape[2])(style) # To be combined in AdaIN layer, content and style image must have the same initial size
-        
-        if training :
-            encoded_content = self.encoder(content, training=True)[-1] 
-            style_full_features = self.encoder(resized_style, training=True)
-            encoded_style = style_full_features[-1]
-        else :
-            encoded_content = self.encoder(content)
-            encoded_style = self.encoder(resized_style)
+        content = inputs[0].to(self.device)
+        style = inputs[1].to(self.device)
+        resized_style = keras.layers.Resizing(content.shape[1], content.shape[2])(style)
+
+        encoded_content = self.encoder(content) 
+        style_full_features = self.encoder(resized_style, all_features=True)
+        encoded_style = style_full_features[-1]
 
         combined_features = self.ada_in(encoded_content, encoded_style)
+
         decoded_img = self.decoder(combined_features)
+        gen_image_full_features = self.encoder(decoded_img, all_features=True)
+
+        self.add_loss(self.loss_.total_loss(gen_image_full_features, style_full_features, combined_features))
         
-        if training :
-            gen_image_full_features = self.encoder(decoded_img, training=True)
-            return gen_image_full_features, style_full_features, combined_features # During training, the generated image is not important, but its features are for the loss computation
-        else :
-            return decoded_img 
+        return decoded_img
 
 
-class AdaINLoss(Loss) :
-    def __init__(self, lamb, name=None, reduction="sum_over_batch_size", dtype=None):
+class AdaINLoss() :
+    def __init__(self, lamb, reduction="sum_over_batch_size") :
         """The custom loss function defined in the AdaIN paper
 
         Args:
             lamb (float): Relative weighing of the style loss wrt the content loss
         """
-        super().__init__(name, reduction, dtype)
         self.lamb = lamb
-    
+        self.reduction = reduction
+
+    def batched_euclidean_distance(self, tensor1, tensor2) :
+        """Compute the pairwise euclidean distances between two batches of Tensors
+
+        Args:
+            tensor1 (tensor): First tensor batch
+            tensor2 (tensor): Second tensor batch
+
+        Returns:
+            tensor: The batched euvclidean distance
+        """
+        return torch.sqrt(torch.sum((tensor1 - tensor2)**2, dim=(1,2,3)))
+
     def content_loss(self, generated_features, adain_output) :
         """Compute the euclidean distance between the features of the generated image and the output of the AdaIN layer
 
@@ -164,7 +175,7 @@ class AdaINLoss(Loss) :
         Returns:
             Tensor: The euclidean distance (or 2-norm) between the two tensors
         """
-        return torch.cdist(generated_features, adain_output, p=2.0)
+        return self.batched_euclidean_distance(generated_features, adain_output)
 
     def style_loss(self, generated_full_features, style_full_features) :
         """Compute the style loss by computing euclidean distances between basis statistics from features of the generated image and the style image
@@ -176,18 +187,28 @@ class AdaINLoss(Loss) :
         Returns:
             Tensor: The accumulation of euclidean distances between statistics
         """
-        style_loss = 0
-        for layer in enumerate(generated_full_features) :
+        if not isinstance(generated_full_features, tuple) :
+            generated_full_features = (generated_full_features)
+
+        style_loss = torch.zeros(generated_full_features[0].shape[0]).to(generated_full_features[0].device)
+        for layer in range(len(generated_full_features)) :
             gen_mean = instance_mean(generated_full_features[layer])
             gen_std = instance_std(generated_full_features[layer])
             style_mean = instance_mean(style_full_features[layer])
             style_std = instance_std(style_full_features[layer])
-
-            style_loss += torch.cdist(gen_mean, style_mean, p=2.0) + torch.cdist(gen_std, style_std, p=2.0)
-        
+            
+            style_loss += self.batched_euclidean_distance(gen_mean, style_mean) + self.batched_euclidean_distance(gen_std, style_std)
+    
         return style_loss
     
-    def call(self, y_pred, y_true) :
-        (generated_full_features, style_full_features, adain_output) = y_pred
+    def total_loss(self, generated_full_features, style_full_features, adain_output) :
         generated_features = generated_full_features[-1]
-        return self.content_loss(generated_features, adain_output) + self.lamb * self.style_loss(generated_full_features, style_full_features)
+        batched_loss = self.content_loss(generated_features, adain_output) + self.lamb * self.style_loss(generated_full_features, style_full_features)
+
+        match self.reduction :
+            case "sum_over_batch_size" | "mean" :
+                return batched_loss.mean()
+            case "sum" :
+                return batched_loss.sum()
+            case _ :
+                return batched_loss
