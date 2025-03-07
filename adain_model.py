@@ -102,7 +102,7 @@ class VGGDecoder(Layer) :
             ReflectiveConv2D(64, (3,3), activation='relu'),
             keras.layers.UpSampling2D(size=(2,2), data_format="channels_last", interpolation="nearest"),
             ReflectiveConv2D(64, (3,3), activation='relu'),
-            ReflectiveConv2D(3, (3,3), activation='relu')
+            ReflectiveConv2D(3, (3,3), activation='sigmoid')
         ), trainable=True)
     
     def call(self, inputs) :
@@ -121,9 +121,10 @@ class AdaINModel(Model) :
 
         self.loss_ = AdaINLoss(lamb=lamb, reduction=loss_reduction)
 
+        self.input_shape = (None, None, None, 3)
+        self.output_shape = (None, None, None, 3)
         self.built = True
 
-    
     def call(self, inputs, training=False):
         content = inputs[0].to(self.device)
         style = inputs[1].to(self.device)

@@ -30,7 +30,8 @@ class AdaINDataset(Dataset) :
         content_tensor = self.transform_pipeline(content_img)
         style_tensor = self.transform_pipeline(style_img)
         
-        return (content_tensor, style_tensor), torch.tensor(0.0) 
+        return (content_tensor, style_tensor), torch.tensor(0.0) # The null tensor is returned as a fake label data, whose existence is needed by Keras
+
 
 class AdaINDataModule() :
     def __init__(
@@ -122,12 +123,18 @@ class AdaINDataModule() :
         self._are_datasets_created = True    
 
     def train_dataloader(self) :
+        if not self._are_datasets_created :
+            self.create_datasets()
         return DataLoader(self._train_dataset, batch_size=self.batch_size, shuffle=False) # No need to shuffle here as the datasets are already shuffled (if self.shuffle is enabled)
 
     def val_dataloader(self) :
+        if not self._are_datasets_created :
+            self.create_datasets()
         return DataLoader(self._val_dataset, batch_size=self.batch_size, shuffle=False) # No need to shuffle here as the datasets are already shuffled (if self.shuffle is enabled)
 
     def test_dataloader(self) :
+        if not self._are_datasets_created :
+            self.create_datasets()
         return DataLoader(self._test_dataset, batch_size=self.batch_size, shuffle=False) # No need to shuffle here as the datasets are already shuffled (if self.shuffle is enabled)
 
 
