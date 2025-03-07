@@ -102,7 +102,7 @@ class VGGDecoder(Layer) :
             ReflectiveConv2D(64, (3,3), activation='relu'),
             keras.layers.UpSampling2D(size=(2,2), data_format="channels_last", interpolation="nearest"),
             ReflectiveConv2D(64, (3,3), activation='relu'),
-            ReflectiveConv2D(3, (3,3), activation='sigmoid')
+            ReflectiveConv2D(3, (3,3), activation=None)
         ), trainable=True)
     
     def call(self, inputs) :
