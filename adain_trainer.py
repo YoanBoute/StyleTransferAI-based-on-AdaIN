@@ -35,12 +35,18 @@ class AdaINTrainer() :
         self._prepared = True
         print("Model is ready to be trained")
     
-    def train(self, epochs = 1, steps_per_epoch = None, log_every_n_epochs = None) :
+    def train(self, epochs = 1, steps_per_epoch = None, log_every_n_epochs = None, validation_steps = 10, test_steps = 100) :
         if not self._prepared :
             self._prepare()
         if log_every_n_epochs is None :
             log_every_n_epochs = epochs
         torch.random.manual_seed(self.dm.seed) # Seed is fixed here so as to have reproducible training (especially to handle the RandomCrop transform and so to always have the same image pairs)
+        np.random.seed(self.dm.seed)
+        
+        train_dataloader = self.dm.train_dataloader()
+        val_dataloader = self.dm.val_dataloader()
+        test_dataloader = self.dm.test_dataloader()
+
         num_train_loops = int(np.ceil(epochs / log_every_n_epochs))
         print("Training the model...")
         for loop in range(num_train_loops) :
@@ -52,8 +58,8 @@ class AdaINTrainer() :
                 params = {'style_loss_weight' : self.model.loss_.lamb,
                         'loss_reduction' : self.model.loss_.reduction}
                 mlflow.log_params(params)
-                self.model.fit(self.dm.train_dataloader(), validation_data=self.dm.val_dataloader(), epochs=initial_epoch + min(log_every_n_epochs, epochs-initial_epoch), initial_epoch=initial_epoch, steps_per_epoch=steps_per_epoch)
-                test_loss = self.model.evaluate(self.dm.test_dataloader())
+                self.model.fit(train_dataloader, validation_data=val_dataloader, epochs=initial_epoch + min(log_every_n_epochs, epochs-initial_epoch), initial_epoch=initial_epoch, steps_per_epoch=steps_per_epoch, validation_steps=validation_steps)
+                test_loss = self.model.evaluate(test_dataloader, steps=test_steps)
                 mlflow.log_metric("test_loss", test_loss)
             if num_train_loops > 1 :
                 print("Checkpoint reached, model has been logged")

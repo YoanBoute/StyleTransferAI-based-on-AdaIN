@@ -1,4 +1,4 @@
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Sampler
 import numpy as np
 import matplotlib.pyplot as plt
 import os
@@ -26,11 +26,32 @@ class AdaINDataset(Dataset) :
         # Loading the images only when required prevents from having to load the whole dataset at once, which would break the system
         content_img = keras.utils.load_img(content_file)
         style_img = keras.utils.load_img(style_file)
-
+        
         content_tensor = self.transform_pipeline(content_img)
         style_tensor = self.transform_pipeline(style_img)
         
         return (content_tensor, style_tensor), torch.tensor(0.0) # The null tensor is returned as a fake label data, whose existence is needed by Keras
+
+
+class SequentialRepetingSampler(Sampler) :
+    def __init__(self, dataset_size, data_source = None):
+        super().__init__(data_source)
+        self.dataset_size = dataset_size
+        self.indices = np.arange(self.dataset_size)
+        self.pos = -1
+    
+    def __iter__(self):
+        while True :
+            self.pos += 1
+            if self.pos >= self.dataset_size :
+                np.random.shuffle(self.indices)
+                self.pos = 0
+            # print(self.pos, '/', self.dataset_size)
+            yield self.indices[self.pos]
+            
+    
+    def __len__(self) :
+        return self.dataset_size
 
 
 class AdaINDataModule() :
@@ -125,17 +146,17 @@ class AdaINDataModule() :
     def train_dataloader(self) :
         if not self._are_datasets_created :
             self.create_datasets()
-        return DataLoader(self._train_dataset, batch_size=self.batch_size, shuffle=False) # No need to shuffle here as the datasets are already shuffled (if self.shuffle is enabled)
+        return DataLoader(self._train_dataset, batch_size=self.batch_size, shuffle=False, sampler=SequentialRepetingSampler(len(self._train_dataset))) # No need to shuffle here as the datasets are already shuffled (if self.shuffle is enabled)
 
     def val_dataloader(self) :
         if not self._are_datasets_created :
             self.create_datasets()
-        return DataLoader(self._val_dataset, batch_size=self.batch_size, shuffle=False) # No need to shuffle here as the datasets are already shuffled (if self.shuffle is enabled)
+        return DataLoader(self._val_dataset, batch_size=self.batch_size, shuffle=False, sampler=SequentialRepetingSampler(len(self._val_dataset))) # No need to shuffle here as the datasets are already shuffled (if self.shuffle is enabled)
 
     def test_dataloader(self) :
         if not self._are_datasets_created :
             self.create_datasets()
-        return DataLoader(self._test_dataset, batch_size=self.batch_size, shuffle=False) # No need to shuffle here as the datasets are already shuffled (if self.shuffle is enabled)
+        return DataLoader(self._test_dataset, batch_size=self.batch_size, shuffle=False, sampler=SequentialRepetingSampler(len(self._test_dataset))) # No need to shuffle here as the datasets are already shuffled (if self.shuffle is enabled)
 
 
     def __setattr__(self, name, value):
