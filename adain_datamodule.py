@@ -134,7 +134,8 @@ class AdaINDataModule() :
             transforms.Resize(self.imgs_size),
             transforms.RandomCrop(self.crop_window_size),
             transforms.ToTensor(),
-            transforms.Lambda(lambda x: x.permute(1, 2, 0))
+            transforms.Lambda(lambda x : x.permute(1, 2, 0)),
+            transforms.Lambda(lambda x : 255 * x), # Scale images to [0, 255] as expected for VGG19
         ))
 
         self._train_dataset = AdaINDataset(train_images, transform_pipeline)

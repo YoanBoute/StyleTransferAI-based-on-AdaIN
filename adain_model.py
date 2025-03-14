@@ -2,10 +2,14 @@ import numpy as np
 import torch
 
 import os
+import shutil
 os.environ["KERAS_BACKEND"] = "torch"
 import keras
 from keras.layers import Layer # type: ignore
 from keras import ops, Model, Loss
+import mlflow
+from pathlib import Path
+import json
 
 def instance_mean(batch) :
     shape = batch.shape
@@ -32,6 +36,7 @@ def instance_std(batch) :
     return batch.std(axis=[1,2], keepdims=True) + 1e-6 # Constant added for numerical stability
 
 
+@keras.saving.register_keras_serializable()
 class VGGEncoder(Layer) :
     def __init__(self) :
         super().__init__()
@@ -67,14 +72,23 @@ class VGGEncoder(Layer) :
             return relu4_features # During inference, only the final features are needed
     
 
+@keras.saving.register_keras_serializable()
 class AdaINLayer(Layer) :
     def __init__(self) :
         super().__init__()
 
     def call(self, content_input, style_input) :
        return instance_std(style_input) * ((content_input - instance_mean(content_input)) / instance_std(content_input)) + instance_mean(style_input)
+    
+    def get_config(self):
+        config = super().get_config()
+        return config
+    
+    def build(self, input_shape) :
+        super().build(input_shape)    
 
 
+@keras.saving.register_keras_serializable()
 class ReflectiveConv2D(keras.layers.Conv2D) :
     """Custom Conv2D layer with reflective padding"""
     def __init__(self, filters, kernel_size, pad_width = ((0,0), (1,1), (1,1), (0,0)), strides=(1,1), data_format="channels_last", dilation_rate=(1,1), groups=1, activation=None, use_bias=True, kernel_initializer="glorot_uniform", bias_initializer="zeros", kernel_regularizer=None, bias_regularizer=None, activity_regularizer=None, kernel_constraint=None, bias_constraint=None, **kwargs):
@@ -85,7 +99,16 @@ class ReflectiveConv2D(keras.layers.Conv2D) :
         inputs = keras.ops.pad(inputs, pad_width=self.pad_width, mode="reflect")
         return super().call(inputs)
     
+    def get_config(self):
+        config = super().get_config()
+        config.update({"pad_width": self.pad_width})
+        return config
+    
+    def build(self, input_shape) :
+        super().build(input_shape)
 
+
+@keras.saving.register_keras_serializable()
 class VGGDecoder(Layer) :
     """Decoder described in the AdaIN paper, built symmetrically to the encoder, using reflective padding and nearest up-sampling"""
     def __init__(self) :
@@ -108,7 +131,11 @@ class VGGDecoder(Layer) :
     def call(self, inputs) :
         return self.decoder(inputs)
     
+    def build(self, input_shape) :
+        super().build(input_shape)
 
+
+@keras.saving.register_keras_serializable()
 class AdaINModel(Model) :
     def __init__(self, lamb = 1.0, loss_reduction = "sum_over_batch_size", *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -123,11 +150,39 @@ class AdaINModel(Model) :
 
         self.input_shape = (None, None, None, 3)
         self.output_shape = (None, None, None, 3)
-        self.built = True
+        self.build(input_shape=[(None, 256, 256, 3), (None, 256, 256, 3)])
+    
+    @staticmethod
+    def load_from_mlflow(run_id, mlflow_tracking_uri) :
+        mlflow.set_tracking_uri(mlflow_tracking_uri)
+        tmp_path = Path('./_tmp_download')
+        arch_path = Path(mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="architecture.json", dst_path=tmp_path / 'architecture.json'))
+        weights_path = Path(mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="weights.weights.h5", dst_path=tmp_path / 'weights.weights.h5'))
+
+        with open(arch_path, 'r') as f :
+            json_config = json.load(f)
+
+        model = keras.models.model_from_json(json.dumps(json_config))
+
+        # Build the model as expected
+        input = [torch.zeros((1,256,256,3)), torch.zeros((1,256,256,3))]
+        model.compile(optimizer = keras.optimizers.get(json_config["compile_config"]["optimizer"]["config"]["name"]))
+        model.train_on_batch(input) # This step is required for Keras to build the model layers and the optimizer variables
+        model.load_weights(weights_path)
+
+        # Remove downloaded files once used to prevent useless disk storage
+        shutil.rmtree(tmp_path)
+
+        return model
+
+    def build(self, input_shape) :
+        super().build(input_shape)
 
     def call(self, inputs, training=False):
         content = inputs[0].to(self.device)
+        content = keras.applications.vgg19.preprocess_input(content) # Make sure the format of input is compatible with VGG (BGR, mean-centered)
         style = inputs[1].to(self.device)
+        style = keras.applications.vgg19.preprocess_input(style)
         resized_style = keras.layers.Resizing(content.shape[1], content.shape[2])(style)
 
         encoded_content = self.encoder(content) 
