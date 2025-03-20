@@ -29,7 +29,8 @@ class AdaINTrainer() :
             raise Exception(f"Could not create the datasets ({str(e)})") from None
         print("Compiling the model...")
         try :
-            self.model.compile(optimizer=self.optimizer)
+            if not self.model.compiled :
+                self.model.compile(optimizer=self.optimizer)
         except Exception as e :
             raise Exception(f"Could not compile the model ({str(e)})") from None
         

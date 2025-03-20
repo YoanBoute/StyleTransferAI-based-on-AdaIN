@@ -5,36 +5,57 @@ import os
 import shutil
 os.environ["KERAS_BACKEND"] = "torch"
 import keras
-from keras.layers import Layer # type: ignore
+from keras.layers import Layer, Input # type: ignore
 from keras import ops, Model, Loss
 import mlflow
 from pathlib import Path
 import json
+import h5py
 
-def instance_mean(batch) :
-    shape = batch.shape
-    match len(shape) :
-        case 4 :
-            pass
-        case 3 :
-            batch = batch.unsqueeze(0)
-        case _ :
-            raise ValueError("Incorrect shape for the provided batch. Expected a 3- or 4-dimensional Tensor.")
+# def instance_mean(batch) :
+#     shape = batch.shape
+#     match len(shape) :
+#         case 4 :
+#             pass
+#         case 3 :
+#             batch = batch.unsqueeze(0)
+#         case _ :
+#             raise ValueError("Incorrect shape for the provided batch. Expected a 3- or 4-dimensional Tensor.")
     
-    return batch.mean(axis=[1,2], keepdims=True)
+#     return batch.mean(axis=[1,2], keepdims=True)
 
-def instance_std(batch) :
-    shape = batch.shape
-    match len(shape) :
-        case 4 :
-            pass
-        case 3 :
-            batch = batch.unsqueeze(0)
-        case _ :
-            raise ValueError("Incorrect shape for the provided batch. Expected a 3- or 4-dimensional Tensor.")
+# def instance_std(batch) :
+#     shape = batch.shape
+#     match len(shape) :
+#         case 4 :
+#             pass
+#         case 3 :
+#             batch = batch.unsqueeze(0)
+#         case _ :
+#             raise ValueError("Incorrect shape for the provided batch. Expected a 3- or 4-dimensional Tensor.")
     
-    return batch.std(axis=[1,2], keepdims=True) + 1e-6 # Constant added for numerical stability
+#     return batch.std(axis=[1,2], keepdims=True) + 1e-6 # Constant added for numerical stability
 
+def instance_mean(batch):
+    return ops.mean(batch, axis=[1, 2], keepdims=True)
+
+def instance_std(batch):
+    return ops.std(batch, axis=[1, 2], keepdims=True) + 1e-6
+
+
+@keras.saving.register_keras_serializable()
+class ReflectiveConv2D(keras.layers.Conv2D):
+    """Custom Conv2D layer with reflective-same padding"""
+    def __init__(self, filters, kernel_size, strides=(1,1), data_format="channels_last", dilation_rate=(1,1), groups=1, activation=None, use_bias=True, kernel_initializer="glorot_uniform", bias_initializer="zeros", kernel_regularizer=None, bias_regularizer=None, activity_regularizer=None, kernel_constraint=None, bias_constraint=None, **kwargs):
+        super().__init__(filters, kernel_size, strides=strides, padding="valid", data_format=data_format, dilation_rate=dilation_rate, groups=groups, activation=activation, use_bias=use_bias, kernel_initializer=kernel_initializer, bias_initializer=bias_initializer, kernel_regularizer=kernel_regularizer, bias_regularizer=bias_regularizer, activity_regularizer=activity_regularizer, kernel_constraint=kernel_constraint, bias_constraint=bias_constraint, **kwargs)
+    
+    def call(self, inputs):
+        pad_h = self.kernel_size[0] // 2 # Dynamic padding computation
+        pad_w = self.kernel_size[1] // 2  
+        pad_width = ((0, 0), (pad_h, pad_h), (pad_w, pad_w), (0, 0))  
+        inputs = keras.ops.pad(inputs, pad_width=pad_width, mode="reflect")
+        return super().call(inputs)
+    
 
 @keras.saving.register_keras_serializable()
 class VGGEncoder(Layer) :
@@ -49,11 +70,27 @@ class VGGEncoder(Layer) :
             name="vgg19"
         )
 
+        # Replace all conv layers with ReflectivePadding conv layers
+        inputs = Input(shape=(None, None, 3))
+        x = inputs
+        for layer in basis_vgg.layers :
+            if isinstance(layer, keras.layers.InputLayer) :
+                x = layer.output
+            elif isinstance(layer, keras.layers.Conv2D) :
+                x = ReflectiveConv2D(filters=layer.filters, kernel_size=layer.kernel_size, strides=layer.strides, activation=layer.activation, use_bias=layer.use_bias, name=layer.name)(x)
+            else :
+                x = layer(x)
+        reflective_vgg = Model(inputs, x)
+
+        for layer in basis_vgg.layers:
+            if layer.name in reflective_vgg.layers:
+                reflective_vgg.get_layer(layer.name).set_weights(layer.get_weights())
+
         # The network is subdivided to have access to the features of different depths (for the style loss computation especially)
-        self.relu1_1 = keras.Sequential(basis_vgg.layers[:2])
-        self.relu2_1 = keras.Sequential(basis_vgg.layers[2:5])
-        self.relu3_1 = keras.Sequential(basis_vgg.layers[5:8])        
-        self.relu4_1 = keras.Sequential(basis_vgg.layers[8:13]) # As described in the AdaIN paper, the encoder is the VGG19 network up to the relu4_1 layer
+        self.relu1_1 = keras.Sequential(reflective_vgg.layers[:2])
+        self.relu2_1 = keras.Sequential(reflective_vgg.layers[2:5])
+        self.relu3_1 = keras.Sequential(reflective_vgg.layers[5:8])        
+        self.relu4_1 = keras.Sequential(reflective_vgg.layers[8:13]) # As described in the AdaIN paper, the encoder is the VGG19 network up to the relu4_1 layer
         
         self.relu1_1.trainable = False
         self.relu2_1.trainable = False
@@ -86,26 +123,6 @@ class AdaINLayer(Layer) :
     
     def build(self, input_shape) :
         super().build(input_shape)    
-
-
-@keras.saving.register_keras_serializable()
-class ReflectiveConv2D(keras.layers.Conv2D) :
-    """Custom Conv2D layer with reflective padding"""
-    def __init__(self, filters, kernel_size, pad_width = ((0,0), (1,1), (1,1), (0,0)), strides=(1,1), data_format="channels_last", dilation_rate=(1,1), groups=1, activation=None, use_bias=True, kernel_initializer="glorot_uniform", bias_initializer="zeros", kernel_regularizer=None, bias_regularizer=None, activity_regularizer=None, kernel_constraint=None, bias_constraint=None, **kwargs):
-        self.pad_width = pad_width
-        super().__init__(filters, kernel_size, strides, padding="valid", data_format=data_format, dilation_rate=dilation_rate, groups=groups, activation=activation, use_bias=use_bias, kernel_initializer=kernel_initializer, bias_initializer=bias_initializer, kernel_regularizer=kernel_regularizer, bias_regularizer=bias_regularizer, activity_regularizer=activity_regularizer, kernel_constraint=kernel_constraint, bias_constraint=bias_constraint, **kwargs)
-    
-    def call(self, inputs):
-        inputs = keras.ops.pad(inputs, pad_width=self.pad_width, mode="reflect")
-        return super().call(inputs)
-    
-    def get_config(self):
-        config = super().get_config()
-        config.update({"pad_width": self.pad_width})
-        return config
-    
-    def build(self, input_shape) :
-        super().build(input_shape)
 
 
 @keras.saving.register_keras_serializable()
@@ -156,25 +173,85 @@ class AdaINModel(Model) :
     def load_from_mlflow(run_id, mlflow_tracking_uri) :
         mlflow.set_tracking_uri(mlflow_tracking_uri)
         tmp_path = Path('./_tmp_download')
-        arch_path = Path(mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="architecture.json", dst_path=tmp_path / 'architecture.json'))
-        weights_path = Path(mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="weights.weights.h5", dst_path=tmp_path / 'weights.weights.h5'))
+        try : 
+            arch_path = Path(mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="architecture.json", dst_path=tmp_path / 'architecture.json'))
+            weights_path = Path(mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="weights.weights.h5", dst_path=tmp_path / 'weights.weights.h5'))
 
-        with open(arch_path, 'r') as f :
-            json_config = json.load(f)
+            with open(arch_path, 'r') as f :
+                json_config = json.load(f)
 
-        model = keras.models.model_from_json(json.dumps(json_config))
+            model = keras.models.model_from_json(json.dumps(json_config))
 
-        # Build the model as expected
-        input = [torch.zeros((1,256,256,3)), torch.zeros((1,256,256,3))]
-        model.compile(optimizer = keras.optimizers.get(json_config["compile_config"]["optimizer"]["config"]["name"]))
-        model.train_on_batch(input) # This step is required for Keras to build the model layers and the optimizer variables
-        model.load_weights(weights_path)
+            # Build the model as expected
+            input = [torch.zeros((1,256,256,3)), torch.zeros((1,256,256,3))]
+            model.compile(optimizer = keras.optimizers.get(json_config["compile_config"]["optimizer"]["config"]["name"]))
+            model.train_on_batch(input) # This step is required for Keras to build the model layers and the optimizer variables
+            # model.load_weights(weights_path)
 
-        # Remove downloaded files once used to prevent useless disk storage
-        shutil.rmtree(tmp_path)
+            with h5py.File(weights_path, 'r') as f:
+                block_name = 'relu1_1'
+                layer_name = 'conv2d'
+                model.encoder.relu1_1.layers[0].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
+                block_name = 'relu2_1'
+                layer_name = 'conv2d'
+                model.encoder.relu2_1.layers[0].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
+                layer_name = 'conv2d_1'
+                model.encoder.relu2_1.layers[2].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
+                block_name = 'relu3_1'
+                layer_name = 'conv2d'
+                model.encoder.relu3_1.layers[0].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
+                layer_name = 'conv2d_1'
+                model.encoder.relu3_1.layers[2].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
+                block_name = 'relu4_1'
+                layer_name = 'conv2d'
+                model.encoder.relu4_1.layers[0].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
+                layer_name = 'conv2d_1'
+                model.encoder.relu4_1.layers[1].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
+                layer_name = 'conv2d_2'
+                model.encoder.relu4_1.layers[2].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
+                layer_name = 'conv2d_3'
+                model.encoder.relu4_1.layers[4].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
+                
+                layer_name = 'reflective_conv2d'
+                model.decoder.decoder.layers[0].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
+                layer_name = 'reflective_conv2d_1'
+                model.decoder.decoder.layers[2].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
+                layer_name = 'reflective_conv2d_2'
+                model.decoder.decoder.layers[3].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
+                layer_name = 'reflective_conv2d_3'
+                model.decoder.decoder.layers[4].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
+                layer_name = 'reflective_conv2d_4'
+                model.decoder.decoder.layers[5].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
+                layer_name = 'reflective_conv2d_5'
+                model.decoder.decoder.layers[7].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
+                layer_name = 'reflective_conv2d_6'
+                model.decoder.decoder.layers[8].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
+                layer_name = 'reflective_conv2d_7'
+                model.decoder.decoder.layers[10].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
+                layer_name = 'reflective_conv2d_8'
+                model.decoder.decoder.layers[11].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
 
-        return model
 
+
+
+                # for layer in model.layers:
+                #     if isinstance(layer, ReflectiveConv2D):
+                #         original_conv_name = layer.name.replace("reflective_", "") 
+                        
+                #         if original_conv_name in layer_names:
+                #             weights = f[original_conv_name]
+                #             layer.set_weights([weights["kernel:0"][()], weights["bias:0"][()]])
+                #         else:
+                #             print(f"⚠️ Warning : no weights found for {layer.name}")
+
+            # Remove downloaded files once used to prevent useless disk storage
+            shutil.rmtree(tmp_path)
+
+            return model
+        except Exception as e :
+            shutil.rmtree(tmp_path)
+            raise e
+        
     def build(self, input_shape) :
         super().build(input_shape)
 
