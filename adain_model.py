@@ -186,50 +186,50 @@ class AdaINModel(Model) :
             input = [torch.zeros((1,256,256,3)), torch.zeros((1,256,256,3))]
             model.compile(optimizer = keras.optimizers.get(json_config["compile_config"]["optimizer"]["config"]["name"]))
             model.train_on_batch(input) # This step is required for Keras to build the model layers and the optimizer variables
-            # model.load_weights(weights_path)
+            model.load_weights(weights_path)
 
-            with h5py.File(weights_path, 'r') as f:
-                block_name = 'relu1_1'
-                layer_name = 'conv2d'
-                model.encoder.relu1_1.layers[0].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
-                block_name = 'relu2_1'
-                layer_name = 'conv2d'
-                model.encoder.relu2_1.layers[0].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
-                layer_name = 'conv2d_1'
-                model.encoder.relu2_1.layers[2].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
-                block_name = 'relu3_1'
-                layer_name = 'conv2d'
-                model.encoder.relu3_1.layers[0].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
-                layer_name = 'conv2d_1'
-                model.encoder.relu3_1.layers[2].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
-                block_name = 'relu4_1'
-                layer_name = 'conv2d'
-                model.encoder.relu4_1.layers[0].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
-                layer_name = 'conv2d_1'
-                model.encoder.relu4_1.layers[1].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
-                layer_name = 'conv2d_2'
-                model.encoder.relu4_1.layers[2].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
-                layer_name = 'conv2d_3'
-                model.encoder.relu4_1.layers[4].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
+            # with h5py.File(weights_path, 'r') as f:
+            #     block_name = 'relu1_1'
+            #     layer_name = 'conv2d'
+            #     model.encoder.relu1_1.layers[0].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
+            #     block_name = 'relu2_1'
+            #     layer_name = 'conv2d'
+            #     model.encoder.relu2_1.layers[0].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
+            #     layer_name = 'conv2d_1'
+            #     model.encoder.relu2_1.layers[2].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
+            #     block_name = 'relu3_1'
+            #     layer_name = 'conv2d'
+            #     model.encoder.relu3_1.layers[0].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
+            #     layer_name = 'conv2d_1'
+            #     model.encoder.relu3_1.layers[2].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
+            #     block_name = 'relu4_1'
+            #     layer_name = 'conv2d'
+            #     model.encoder.relu4_1.layers[0].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
+            #     layer_name = 'conv2d_1'
+            #     model.encoder.relu4_1.layers[1].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
+            #     layer_name = 'conv2d_2'
+            #     model.encoder.relu4_1.layers[2].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
+            #     layer_name = 'conv2d_3'
+            #     model.encoder.relu4_1.layers[4].set_weights([f["encoder"][block_name]["layers"][layer_name]["vars"]['0'], f["encoder"][block_name]["layers"][layer_name]["vars"]['1']])
                 
-                layer_name = 'reflective_conv2d'
-                model.decoder.decoder.layers[0].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
-                layer_name = 'reflective_conv2d_1'
-                model.decoder.decoder.layers[2].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
-                layer_name = 'reflective_conv2d_2'
-                model.decoder.decoder.layers[3].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
-                layer_name = 'reflective_conv2d_3'
-                model.decoder.decoder.layers[4].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
-                layer_name = 'reflective_conv2d_4'
-                model.decoder.decoder.layers[5].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
-                layer_name = 'reflective_conv2d_5'
-                model.decoder.decoder.layers[7].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
-                layer_name = 'reflective_conv2d_6'
-                model.decoder.decoder.layers[8].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
-                layer_name = 'reflective_conv2d_7'
-                model.decoder.decoder.layers[10].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
-                layer_name = 'reflective_conv2d_8'
-                model.decoder.decoder.layers[11].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
+            #     layer_name = 'reflective_conv2d'
+            #     model.decoder.decoder.layers[0].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
+            #     layer_name = 'reflective_conv2d_1'
+            #     model.decoder.decoder.layers[2].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
+            #     layer_name = 'reflective_conv2d_2'
+            #     model.decoder.decoder.layers[3].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
+            #     layer_name = 'reflective_conv2d_3'
+            #     model.decoder.decoder.layers[4].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
+            #     layer_name = 'reflective_conv2d_4'
+            #     model.decoder.decoder.layers[5].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
+            #     layer_name = 'reflective_conv2d_5'
+            #     model.decoder.decoder.layers[7].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
+            #     layer_name = 'reflective_conv2d_6'
+            #     model.decoder.decoder.layers[8].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
+            #     layer_name = 'reflective_conv2d_7'
+            #     model.decoder.decoder.layers[10].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
+            #     layer_name = 'reflective_conv2d_8'
+            #     model.decoder.decoder.layers[11].set_weights([f["decoder"]["decoder"]["layers"][layer_name]["vars"]['0'], f["decoder"]["decoder"]["layers"][layer_name]["vars"]['1']])
 
 
 
