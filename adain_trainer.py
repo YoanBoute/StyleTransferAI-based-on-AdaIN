@@ -59,7 +59,8 @@ class AdaINTrainer() :
                 mlflow.keras.autolog(log_models=False, silent=True)
                 mlflow.set_tags(self.mlflow_tags)
                 mlflow.set_tag("Initial epoch", initial_epoch)
-                params = {'style_loss_weight' : self.model.loss_.lamb,
+                params = {'style_loss_weight' : self.model.loss_.style_loss_weight,
+                          'tv_loss_weight' : self.model.loss_.tv_weight,
                           'loss_reduction' : self.model.loss_.reduction}
                 mlflow.log_params(params)
                 self.model.fit(train_dataloader, validation_data=val_dataloader, epochs=initial_epoch + min(log_every_n_epochs, epochs-initial_epoch), initial_epoch=initial_epoch, steps_per_epoch=steps_per_epoch, validation_steps=validation_steps)

@@ -82,8 +82,9 @@ class VGGEncoder(Layer) :
                 x = layer(x)
         reflective_vgg = Model(inputs, x)
 
+        layers_names = [l.name for l in reflective_vgg.layers]
         for layer in basis_vgg.layers:
-            if layer.name in reflective_vgg.layers:
+            if layer.name in layers_names :
                 reflective_vgg.get_layer(layer.name).set_weights(layer.get_weights())
 
         # The network is subdivided to have access to the features of different depths (for the style loss computation especially)
@@ -154,7 +155,7 @@ class VGGDecoder(Layer) :
 
 @keras.saving.register_keras_serializable()
 class AdaINModel(Model) :
-    def __init__(self, lamb = 1.0, loss_reduction = "sum_over_batch_size", *args, **kwargs):
+    def __init__(self, style_loss_weight = 1.0, tv_loss_weight = 0.1, loss_reduction = "sum_over_batch_size", *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.to(self.device)
@@ -163,7 +164,7 @@ class AdaINModel(Model) :
         self.ada_in = AdaINLayer().to(self.device)
         self.decoder = VGGDecoder().to(self.device)
 
-        self.loss_ = AdaINLoss(lamb=lamb, reduction=loss_reduction)
+        self.loss_ = AdaINLoss(style_loss_weight=style_loss_weight, tv_weight=tv_loss_weight, reduction=loss_reduction)
 
         self.input_shape = (None, None, None, 3)
         self.output_shape = (None, None, None, 3)
@@ -256,10 +257,10 @@ class AdaINModel(Model) :
         super().build(input_shape)
 
     def call(self, inputs, training=False):
-        content = inputs[0].to(self.device)
-        content = keras.applications.vgg19.preprocess_input(content) # Make sure the format of input is compatible with VGG (BGR, mean-centered)
-        style = inputs[1].to(self.device)
-        style = keras.applications.vgg19.preprocess_input(style)
+        content = inputs[0]
+        content = keras.applications.vgg19.preprocess_input(content).to(self.device) # Make sure the format of input is compatible with VGG (BGR, mean-centered)
+        style = inputs[1]
+        style = keras.applications.vgg19.preprocess_input(style).to(self.device)
         resized_style = keras.layers.Resizing(content.shape[1], content.shape[2])(style)
 
         encoded_content = self.encoder(content) 
@@ -271,19 +272,21 @@ class AdaINModel(Model) :
         decoded_img = self.decoder(combined_features)
         gen_image_full_features = self.encoder(decoded_img, all_features=True)
 
-        self.add_loss(self.loss_.total_loss(gen_image_full_features, style_full_features, combined_features))
+        self.add_loss(self.loss_.total_loss(gen_image_full_features, style_full_features, combined_features, decoded_img))
         
         return decoded_img
 
 
 class AdaINLoss() :
-    def __init__(self, lamb, reduction="sum_over_batch_size") :
+    def __init__(self, style_loss_weight, tv_weight, reduction="sum_over_batch_size") :
         """The custom loss function defined in the AdaIN paper
 
         Args:
-            lamb (float): Relative weighing of the style loss wrt the content loss
+            style_loss_weight (float): Relative weighing of the style loss wrt the content loss
+            tv_weight (float): Relative weighing of the total variation loss wrt the content loss
         """
-        self.lamb = lamb
+        self.style_loss_weight = style_loss_weight
+        self.tv_weight = tv_weight
         self.reduction = reduction
 
     def batched_euclidean_distance(self, tensor1, tensor2) :
@@ -334,10 +337,19 @@ class AdaINLoss() :
     
         return style_loss
     
-    def total_loss(self, generated_full_features, style_full_features, adain_output) :
+    def total_variation_loss(self, img):
+        bs_img, h_img, w_img, c_img = img.size()
+        tv_h = torch.pow(img[:,1:,:,:]-img[:,:-1,:,:], 2).sum()
+        tv_w = torch.pow(img[:,:,1:,:]-img[:,:,:-1,:], 2).sum()
+        return (tv_h+tv_w)/(bs_img*c_img*h_img*w_img)
+    
+    def total_loss(self, generated_full_features, style_full_features, adain_output, generated_img) :
         generated_features = generated_full_features[-1]
-        batched_loss = self.content_loss(generated_features, adain_output) + self.lamb * self.style_loss(generated_full_features, style_full_features)
-
+        if self.tv_weight != 0 : # TV loss is computed only if needed, as it slows the computation
+            batched_loss = self.content_loss(generated_features, adain_output) + self.style_loss_weight * self.style_loss(generated_full_features, style_full_features) + self.tv_weight * self.total_variation_loss(generated_img)
+        else :
+            batched_loss = self.content_loss(generated_features, adain_output) + self.style_loss_weight * self.style_loss(generated_full_features, style_full_features)
+        
         match self.reduction :
             case "sum_over_batch_size" | "mean" :
                 return batched_loss.mean()
