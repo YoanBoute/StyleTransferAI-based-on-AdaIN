@@ -56,6 +56,7 @@ class AdaINTrainer() :
         for loop in range(num_train_loops) :
             initial_epoch = loop * log_every_n_epochs 
             with mlflow.start_run() as run :
+                run_id = run.info.run_id
                 mlflow.keras.autolog(log_models=False, silent=True)
                 mlflow.set_tags(self.mlflow_tags)
                 mlflow.set_tag("Initial epoch", initial_epoch)
@@ -70,7 +71,7 @@ class AdaINTrainer() :
             if num_train_loops > 1 :
                 print("Checkpoint reached, model has been logged")
                         
-        print("The training is complete ! The model and its performances have been logged in MLFlow")
+        print(f"The training is complete ! The model and its performances have been logged in MLFlow (Run ID : {run_id})")
     
     def _log_model(self, run) :
         tmp_path = Path('./_tmp_load')

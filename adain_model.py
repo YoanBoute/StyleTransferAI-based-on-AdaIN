@@ -10,37 +10,14 @@ from keras import ops, Model, Loss
 import mlflow
 from pathlib import Path
 import json
-import h5py
-
-# def instance_mean(batch) :
-#     shape = batch.shape
-#     match len(shape) :
-#         case 4 :
-#             pass
-#         case 3 :
-#             batch = batch.unsqueeze(0)
-#         case _ :
-#             raise ValueError("Incorrect shape for the provided batch. Expected a 3- or 4-dimensional Tensor.")
-    
-#     return batch.mean(axis=[1,2], keepdims=True)
-
-# def instance_std(batch) :
-#     shape = batch.shape
-#     match len(shape) :
-#         case 4 :
-#             pass
-#         case 3 :
-#             batch = batch.unsqueeze(0)
-#         case _ :
-#             raise ValueError("Incorrect shape for the provided batch. Expected a 3- or 4-dimensional Tensor.")
-    
-#     return batch.std(axis=[1,2], keepdims=True) + 1e-6 # Constant added for numerical stability
+import matplotlib.pyplot as plt
+import gc
 
 def instance_mean(batch):
     return ops.mean(batch, axis=[1, 2], keepdims=True)
 
 def instance_std(batch):
-    return ops.std(batch, axis=[1, 2], keepdims=True) + 1e-6
+    return ops.std(batch, axis=[1, 2], keepdims=True) + 1e-6 # Constant added for numerical stability
 
 
 @keras.saving.register_keras_serializable()
@@ -125,6 +102,23 @@ class AdaINLayer(Layer) :
     def build(self, input_shape) :
         super().build(input_shape)    
 
+class DepthToSpace(Layer):
+    def __init__(self, block_size):
+        super().__init__()
+        self.block_size = block_size
+
+    def call(self, input):
+        batch, height, width, depth = ops.shape(input)
+        depth = depth // (self.block_size**2)
+
+        x = ops.reshape(
+            input, [batch, height, width, self.block_size, self.block_size, depth]
+        )
+        x = ops.transpose(x, [0, 1, 3, 2, 4, 5])
+        x = ops.reshape(
+            x, [batch, height * self.block_size, width * self.block_size, depth]
+        )
+        return x
 
 @keras.saving.register_keras_serializable()
 class VGGDecoder(Layer) :
@@ -132,17 +126,29 @@ class VGGDecoder(Layer) :
     def __init__(self) :
         super().__init__()
         self.decoder = keras.Sequential((
+            # ReflectiveConv2D(256, (3,3), activation='relu'),
+            # keras.layers.UpSampling2D(size=(2,2), data_format="channels_last", interpolation="bilinear"),
+            # ReflectiveConv2D(256, (3,3), activation='relu'),
+            # ReflectiveConv2D(256, (3,3), activation='relu'),
+            # ReflectiveConv2D(256, (3,3), activation='relu'),
+            # ReflectiveConv2D(128, (3,3), activation='relu'),
+            # keras.layers.UpSampling2D(size=(2,2), data_format="channels_last", interpolation="bilinear"),
+            # ReflectiveConv2D(128, (3,3), activation='relu'),
+            # ReflectiveConv2D(64, (3,3), activation='relu'),
+            # keras.layers.UpSampling2D(size=(2,2), data_format="channels_last", interpolation="bilinear"),
+            # ReflectiveConv2D(64, (3,3), activation='relu'),
+            # ReflectiveConv2D(3, (3,3), activation=None)
+
             ReflectiveConv2D(256, (3,3), activation='relu'),
-            keras.layers.UpSampling2D(size=(2,2), data_format="channels_last", interpolation="nearest"),
-            ReflectiveConv2D(256, (3,3), activation='relu'),
-            ReflectiveConv2D(256, (3,3), activation='relu'),
-            ReflectiveConv2D(256, (3,3), activation='relu'),
-            ReflectiveConv2D(128, (3,3), activation='relu'),
-            keras.layers.UpSampling2D(size=(2,2), data_format="channels_last", interpolation="nearest"),
-            ReflectiveConv2D(128, (3,3), activation='relu'),
+            DepthToSpace(2),
             ReflectiveConv2D(64, (3,3), activation='relu'),
-            keras.layers.UpSampling2D(size=(2,2), data_format="channels_last", interpolation="nearest"),
             ReflectiveConv2D(64, (3,3), activation='relu'),
+            ReflectiveConv2D(64, (3,3), activation='relu'),
+            DepthToSpace(2),
+            ReflectiveConv2D(16, (3,3), activation='relu'),
+            ReflectiveConv2D(16, (3,3), activation='relu'),
+            DepthToSpace(2),
+            ReflectiveConv2D(4, (3,3), activation='relu'),
             ReflectiveConv2D(3, (3,3), activation=None)
         ), trainable=True)
     
@@ -275,6 +281,50 @@ class AdaINModel(Model) :
         self.add_loss(self.loss_.total_loss(gen_image_full_features, style_full_features, combined_features, decoded_img))
         
         return decoded_img
+    
+    def generate(self, content_img : Path | str | torch.types.Tensor, style_img : Path | str | torch.types.Tensor, show_img = False, show_inputs = False) :
+        if isinstance(content_img, (Path, str)) :
+            content_img = torch.tensor(keras.utils.img_to_array(keras.utils.load_img(content_img)))
+        if isinstance(style_img, (Path, str)) :
+            style_img = torch.tensor(keras.utils.img_to_array(keras.utils.load_img(style_img)))
+        
+        if content_img.max() <= 1.0 :
+            content_img *= 255
+        if style_img.max() <= 1.0 :
+            style_img *= 255
+        
+        content_img = content_img.type(torch.int)
+        style_img = style_img.type(torch.int)
+
+        content_img = content_img.to(self.device)
+        style_img = style_img.to(self.device)
+
+        IMAGENET_MEANS = torch.tensor([103.939, 116.779, 123.68])
+        with torch.no_grad() :
+            gen_img = self.call([content_img.unsqueeze(0), style_img.unsqueeze(0)], training=False)[0]
+            gen_img += IMAGENET_MEANS.to(self.device) # The decoder generates images normalized around the ImageNet means for each channel
+            gen_img = gen_img.flip(dims=[-1]) # Convert BGR to RGB
+            gen_img = gen_img.clamp(0,255).cpu().type(torch.int)
+
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        if show_img :
+            if show_inputs :
+                fig, axs = plt.subplots(1,3, figsize=(21,7))
+                axs[0].imshow(content_img.cpu())
+                axs[0].axis('off')
+                axs[1].imshow(style_img.cpu())
+                axs[1].axis('off')
+                axs[2].imshow(gen_img)
+                axs[2].axis('off')
+            else :
+                plt.imshow(gen_img)
+                plt.axis('off')
+            plt.show()
+        else :
+            return gen_img
+
 
 
 class AdaINLoss() :
