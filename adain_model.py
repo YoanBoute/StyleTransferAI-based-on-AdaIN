@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 import os
 import shutil
@@ -12,6 +13,7 @@ from pathlib import Path
 import json
 import matplotlib.pyplot as plt
 import gc
+import cv2 as cv
 
 def instance_mean(batch):
     return ops.mean(batch, axis=[1, 2], keepdims=True)
@@ -102,7 +104,10 @@ class AdaINLayer(Layer) :
     def build(self, input_shape) :
         super().build(input_shape)    
 
+
+@keras.saving.register_keras_serializable()
 class DepthToSpace(Layer):
+    """Keras implementation of the upsampling part of the PixelShuffle layer"""
     def __init__(self, block_size):
         super().__init__()
         self.block_size = block_size
@@ -119,6 +124,7 @@ class DepthToSpace(Layer):
             x, [batch, height * self.block_size, width * self.block_size, depth]
         )
         return x
+    
 
 @keras.saving.register_keras_serializable()
 class VGGDecoder(Layer) :
@@ -126,30 +132,30 @@ class VGGDecoder(Layer) :
     def __init__(self) :
         super().__init__()
         self.decoder = keras.Sequential((
-            # ReflectiveConv2D(256, (3,3), activation='relu'),
-            # keras.layers.UpSampling2D(size=(2,2), data_format="channels_last", interpolation="bilinear"),
-            # ReflectiveConv2D(256, (3,3), activation='relu'),
-            # ReflectiveConv2D(256, (3,3), activation='relu'),
-            # ReflectiveConv2D(256, (3,3), activation='relu'),
-            # ReflectiveConv2D(128, (3,3), activation='relu'),
-            # keras.layers.UpSampling2D(size=(2,2), data_format="channels_last", interpolation="bilinear"),
-            # ReflectiveConv2D(128, (3,3), activation='relu'),
-            # ReflectiveConv2D(64, (3,3), activation='relu'),
-            # keras.layers.UpSampling2D(size=(2,2), data_format="channels_last", interpolation="bilinear"),
-            # ReflectiveConv2D(64, (3,3), activation='relu'),
-            # ReflectiveConv2D(3, (3,3), activation=None)
-
             ReflectiveConv2D(256, (3,3), activation='relu'),
-            DepthToSpace(2),
+            keras.layers.UpSampling2D(size=(2,2), data_format="channels_last", interpolation="bilinear"),
+            ReflectiveConv2D(256, (3,3), activation='relu'),
+            ReflectiveConv2D(256, (3,3), activation='relu'),
+            ReflectiveConv2D(256, (3,3), activation='relu'),
+            ReflectiveConv2D(128, (3,3), activation='relu'),
+            keras.layers.UpSampling2D(size=(2,2), data_format="channels_last", interpolation="bilinear"),
+            ReflectiveConv2D(128, (3,3), activation='relu'),
             ReflectiveConv2D(64, (3,3), activation='relu'),
+            keras.layers.UpSampling2D(size=(2,2), data_format="channels_last", interpolation="bilinear"),
             ReflectiveConv2D(64, (3,3), activation='relu'),
-            ReflectiveConv2D(64, (3,3), activation='relu'),
-            DepthToSpace(2),
-            ReflectiveConv2D(16, (3,3), activation='relu'),
-            ReflectiveConv2D(16, (3,3), activation='relu'),
-            DepthToSpace(2),
-            ReflectiveConv2D(4, (3,3), activation='relu'),
             ReflectiveConv2D(3, (3,3), activation=None)
+
+            # ReflectiveConv2D(256, (3,3), activation='relu'),
+            # DepthToSpace(2),
+            # ReflectiveConv2D(64, (3,3), activation='relu'),
+            # ReflectiveConv2D(64, (3,3), activation='relu'),
+            # ReflectiveConv2D(64, (3,3), activation='relu'),
+            # DepthToSpace(2),
+            # ReflectiveConv2D(16, (3,3), activation='relu'),
+            # ReflectiveConv2D(16, (3,3), activation='relu'),
+            # DepthToSpace(2),
+            # ReflectiveConv2D(4, (3,3), activation='relu'),
+            # ReflectiveConv2D(3, (3,3), activation=None)
         ), trainable=True)
     
     def call(self, inputs) :
@@ -175,7 +181,19 @@ class AdaINModel(Model) :
         self.input_shape = (None, None, None, 3)
         self.output_shape = (None, None, None, 3)
         self.build(input_shape=[(None, 256, 256, 3), (None, 256, 256, 3)])
-    
+
+    @staticmethod
+    def load_registered_model(model_name, version_or_alias, mlflow_tracking_uri) :
+        mlflow.set_tracking_uri(mlflow_tracking_uri)
+        client = mlflow.MlflowClient()
+        if type(version_or_alias) == int :
+            model_info = client.get_model_version(model_name, version_or_alias)
+        else :
+            model_info = client.get_model_version_by_alias(model_name, version_or_alias)
+        
+        run_id = model_info.run_id
+        return AdaINModel.load_from_mlflow(run_id, mlflow_tracking_uri)
+
     @staticmethod
     def load_from_mlflow(run_id, mlflow_tracking_uri) :
         mlflow.set_tracking_uri(mlflow_tracking_uri)
@@ -262,62 +280,125 @@ class AdaINModel(Model) :
     def build(self, input_shape) :
         super().build(input_shape)
 
-    def call(self, inputs, training=False):
+    def call(self, inputs, training=False, alpha = 1.0, style_weights = None) :
         content = inputs[0]
         content = keras.applications.vgg19.preprocess_input(content).to(self.device) # Make sure the format of input is compatible with VGG (BGR, mean-centered)
-        style = inputs[1]
-        style = keras.applications.vgg19.preprocess_input(style).to(self.device)
-        resized_style = keras.layers.Resizing(content.shape[1], content.shape[2])(style)
-
         encoded_content = self.encoder(content) 
-        style_full_features = self.encoder(resized_style, all_features=True)
-        encoded_style = style_full_features[-1]
+
+        style = inputs[1]
+        if isinstance(style, list) : # Combine multiple styles
+            style_imgs = style
+            if style_weights is None or not isinstance(style_weights, list) or np.sum(style_weights) != 1.0 :
+                style_weights = np.ones(len(style)) / len(style)
+            style_full_features = (0, 0, 0, 0)
+            encoded_style = 0
+            for weight, style in zip(style_weights, style_imgs) :
+                style = keras.applications.vgg19.preprocess_input(style).to(self.device)
+                resized_style = keras.layers.Resizing(content.shape[1], content.shape[2])(style)
+                full_features = self.encoder(resized_style, all_features=True)
+                style_full_features = tuple(feat + full_features[i] for i, feat in enumerate(style_full_features))
+                encoded_style += weight * full_features[-1]
+        else :
+            style = keras.applications.vgg19.preprocess_input(style).to(self.device)
+            resized_style = keras.layers.Resizing(content.shape[1], content.shape[2])(style)
+
+            style_full_features = self.encoder(resized_style, all_features=True)
+            encoded_style = style_full_features[-1]
 
         combined_features = self.ada_in(encoded_content, encoded_style)
+        if alpha != 1.0 :
+            combined_features = alpha * combined_features + (1 - alpha) * encoded_content
 
         decoded_img = self.decoder(combined_features)
         gen_image_full_features = self.encoder(decoded_img, all_features=True)
-
+        
         self.add_loss(self.loss_.total_loss(gen_image_full_features, style_full_features, combined_features, decoded_img))
         
         return decoded_img
     
-    def generate(self, content_img : Path | str | torch.types.Tensor, style_img : Path | str | torch.types.Tensor, show_img = False, show_inputs = False) :
-        if isinstance(content_img, (Path, str)) :
-            content_img = torch.tensor(keras.utils.img_to_array(keras.utils.load_img(content_img)))
-        if isinstance(style_img, (Path, str)) :
-            style_img = torch.tensor(keras.utils.img_to_array(keras.utils.load_img(style_img)))
+    def generate(self, content_img : Path | str | torch.types.Tensor, style_img : Path | str | torch.types.Tensor | list, alpha = 1.0, style_weights = None, preserve_colors = False, show_img = False, show_inputs = False) :
+        def rgb2lab(img) :
+            return torch.tensor(cv.cvtColor(img.clone().cpu().numpy().astype(np.uint8), cv.COLOR_RGB2Lab))
         
-        if content_img.max() <= 1.0 :
-            content_img *= 255
-        if style_img.max() <= 1.0 :
-            style_img *= 255
+        def lab2rgb(img) :
+            return torch.tensor(cv.cvtColor(img.clone().cpu().numpy().astype(np.uint8), cv.COLOR_Lab2RGB))
         
-        content_img = content_img.type(torch.int)
-        style_img = style_img.type(torch.int)
-
-        content_img = content_img.to(self.device)
-        style_img = style_img.to(self.device)
+        def process_img(img : Path | str | torch.types.Tensor) :
+            if isinstance(img, (Path, str)) :
+                img = torch.tensor(keras.utils.img_to_array(keras.utils.load_img(img)))
+            if img.max() <= 1.0 :
+                img *= 255
+            if preserve_colors :
+                lab_img = rgb2lab(img) # The images are transformed into luminance-chrominance space
+                img = lab_img[:,:,0].unsqueeze(-1).repeat(1,1,3) # Repeat luminance channels 3 times to simulate an RGB image
+            img = img.type(torch.int).unsqueeze(0).to(self.device)
+            if preserve_colors :
+                return img, lab_img
+            else :
+                return img
+        
+        if preserve_colors :
+            content_img, original_content_lab = process_img(content_img)
+            if isinstance(style_img, list) : 
+                style_list, original_style_lab = [], []
+                for img in style_img :
+                    style_lum, style_lab = process_img(img)
+                    style_list.append(style_lum)
+                    original_style_lab.append(style_lab)
+                style_img = style_list
+            else :
+                style_img, original_style_lab = process_img(style_img)
+        else :
+            content_img = process_img(content_img)
+            if isinstance(style_img, list) : 
+                style_img = [process_img(img) for img in style_img]
+            else :
+                style_img = process_img(style_img)
 
         IMAGENET_MEANS = torch.tensor([103.939, 116.779, 123.68])
         with torch.no_grad() :
-            gen_img = self.call([content_img.unsqueeze(0), style_img.unsqueeze(0)], training=False)[0]
+            gen_img = self.call([content_img, style_img], training=False, alpha = alpha, style_weights=style_weights)
+            if gen_img.size() != content_img.size() : # The generated image might be a little smaller thant the original, due to the downscaling-upscaling process
+                gen_img = F.interpolate(gen_img.permute(0,3,1,2), content_img.shape[1:3], mode='bilinear').permute(0,2,3,1) 
             gen_img += IMAGENET_MEANS.to(self.device) # The decoder generates images normalized around the ImageNet means for each channel
             gen_img = gen_img.flip(dims=[-1]) # Convert BGR to RGB
-            gen_img = gen_img.clamp(0,255).cpu().type(torch.int)
+            gen_img = gen_img.clamp(0,255).cpu().type(torch.int)[0]
+           
+            if preserve_colors :
+                out_luminance = rgb2lab(gen_img)[:,:,0] # To preserve colors, only the luminance of the output is considered
+                gen_img = original_content_lab.clone()
+                gen_img[:,:,0] = out_luminance # The generated luminance is applied to the initial content image chrominance
+                gen_img = lab2rgb(gen_img)
 
         torch.cuda.empty_cache()
         gc.collect()
 
         if show_img :
+            if preserve_colors : # The initial images are restored from their Lab representation to be correctly displayed
+                content_img = lab2rgb(original_content_lab).unsqueeze(0)
+                if isinstance(original_style_lab, list) :
+                    style_img = [lab2rgb(lab).unsqueeze(0) for lab in original_style_lab]
+                else :
+                    style_img = lab2rgb(original_style_lab).unsqueeze(0)
             if show_inputs :
-                fig, axs = plt.subplots(1,3, figsize=(21,7))
-                axs[0].imshow(content_img.cpu())
-                axs[0].axis('off')
-                axs[1].imshow(style_img.cpu())
-                axs[1].axis('off')
-                axs[2].imshow(gen_img)
-                axs[2].axis('off')
+                if isinstance(style_img, list) :
+                    fig, axs = plt.subplots(1,2 + len(style_img), figsize=((2+len(style_img)) * 5, 5))
+                else :
+                    fig, axs = plt.subplots(1,3, figsize=(15, 5))
+
+                for ax in axs.ravel() :
+                    ax.axis('off')
+                axs[0].imshow(content_img.cpu()[0])
+                axs[0].set_title('Content')
+                axs[-1].imshow(gen_img)
+                axs[-1].set_title('Generated image')
+                if isinstance(style_img, list) :
+                    for i, img in enumerate(style_img) :
+                        axs[i+1].imshow(img.cpu()[0])
+                        axs[i+1].set_title(f'Style image #{i+1}')
+                else :
+                    axs[1].imshow(style_img.cpu()[0])
+                    axs[1].set_title('Style')
             else :
                 plt.imshow(gen_img)
                 plt.axis('off')
@@ -351,7 +432,8 @@ class AdaINLoss() :
         """
         return torch.sqrt(torch.sum((tensor1 - tensor2)**2, dim=(1,2,3)))
 
-    def content_loss(self, generated_features, adain_output) :
+    @staticmethod
+    def content_loss(generated_features, adain_output) :
         """Compute the euclidean distance between the features of the generated image and the output of the AdaIN layer
 
         Args:
@@ -361,9 +443,11 @@ class AdaINLoss() :
         Returns:
             Tensor: The euclidean distance (or 2-norm) between the two tensors
         """
-        return self.batched_euclidean_distance(generated_features, adain_output)
+        # return self.batched_euclidean_distance(generated_features, adain_output)
+        return F.mse_loss(generated_features, adain_output)
 
-    def style_loss(self, generated_full_features, style_full_features) :
+    @staticmethod
+    def style_loss(generated_full_features, style_full_features) :
         """Compute the style loss by computing euclidean distances between basis statistics from features of the generated image and the style image
 
         Args:
@@ -376,14 +460,14 @@ class AdaINLoss() :
         if not isinstance(generated_full_features, tuple) :
             generated_full_features = (generated_full_features)
 
-        style_loss = torch.zeros(generated_full_features[0].shape[0]).to(generated_full_features[0].device)
+        style_loss = 0 #torch.zeros(generated_full_features[0].shape[0]).to(generated_full_features[0].device)
         for layer in range(len(generated_full_features)) :
             gen_mean = instance_mean(generated_full_features[layer])
             gen_std = instance_std(generated_full_features[layer])
             style_mean = instance_mean(style_full_features[layer])
             style_std = instance_std(style_full_features[layer])
             
-            style_loss += self.batched_euclidean_distance(gen_mean, style_mean) + self.batched_euclidean_distance(gen_std, style_std)
+            style_loss += F.mse_loss(gen_mean, style_mean) + F.mse_loss(gen_std, style_std)
     
         return style_loss
     
@@ -400,10 +484,11 @@ class AdaINLoss() :
         else :
             batched_loss = self.content_loss(generated_features, adain_output) + self.style_loss_weight * self.style_loss(generated_full_features, style_full_features)
         
-        match self.reduction :
-            case "sum_over_batch_size" | "mean" :
-                return batched_loss.mean()
-            case "sum" :
-                return batched_loss.sum()
-            case _ :
-                return batched_loss
+        return batched_loss
+        # match self.reduction :
+        #     case "sum_over_batch_size" | "mean" :
+        #         return batched_loss.mean()
+        #     case "sum" :
+        #         return batched_loss.sum()
+        #     case _ :
+        #         return batched_loss
