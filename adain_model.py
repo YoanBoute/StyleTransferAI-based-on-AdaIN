@@ -14,6 +14,8 @@ import json
 import matplotlib.pyplot as plt
 import gc
 import cv2 as cv
+import h5py
+from copy import deepcopy
 
 def instance_mean(batch):
     return ops.mean(batch, axis=[1, 2], keepdims=True)
@@ -280,7 +282,7 @@ class AdaINModel(Model) :
     def build(self, input_shape) :
         super().build(input_shape)
 
-    def call(self, inputs, training=False, alpha = 1.0, style_weights = None) :
+    def call(self, inputs, training=False, alpha = 1.0, style_weights = None, inference = False) :
         content = inputs[0]
         content = keras.applications.vgg19.preprocess_input(content).to(self.device) # Make sure the format of input is compatible with VGG (BGR, mean-centered)
         encoded_content = self.encoder(content) 
@@ -288,8 +290,8 @@ class AdaINModel(Model) :
         style = inputs[1]
         if isinstance(style, list) : # Combine multiple styles
             style_imgs = style
-            if style_weights is None or not isinstance(style_weights, list) or np.sum(style_weights) != 1.0 :
-                style_weights = np.ones(len(style)) / len(style)
+            if style_weights is None or not isinstance(style_weights, list) or np.sum(style_weights) != 1.0 or len(style_weights) != len(style_imgs) :
+                style_weights = np.ones(len(style_imgs)) / len(style_imgs)
             style_full_features = (0, 0, 0, 0)
             encoded_style = 0
             for weight, style in zip(style_weights, style_imgs) :
@@ -312,100 +314,146 @@ class AdaINModel(Model) :
         decoded_img = self.decoder(combined_features)
         gen_image_full_features = self.encoder(decoded_img, all_features=True)
         
-        self.add_loss(self.loss_.total_loss(gen_image_full_features, style_full_features, combined_features, decoded_img))
+        if not inference :
+            self.add_loss(self.loss_.total_loss(gen_image_full_features, style_full_features, combined_features, decoded_img))
         
         return decoded_img
     
-    def generate(self, content_img : Path | str | torch.types.Tensor, style_img : Path | str | torch.types.Tensor | list, alpha = 1.0, style_weights = None, preserve_colors = False, show_img = False, show_inputs = False) :
+    def generate(self, content_img : Path | str | torch.types.Tensor, style_img : Path | str | torch.types.Tensor | list, alpha = 1.0, style_weights = None, style_scales = 1, preserve_colors = False, resize_size = 1500, keep_aspect_ratio = False, show_img = False, show_inputs = False) :
         def rgb2lab(img) :
-            return torch.tensor(cv.cvtColor(img.clone().cpu().numpy().astype(np.uint8), cv.COLOR_RGB2Lab))
+            return torch.tensor(cv.cvtColor(img[0].clone().cpu().numpy().astype(np.uint8), cv.COLOR_RGB2Lab)).unsqueeze(0)
         
         def lab2rgb(img) :
-            return torch.tensor(cv.cvtColor(img.clone().cpu().numpy().astype(np.uint8), cv.COLOR_Lab2RGB))
-        
+            return torch.tensor(cv.cvtColor(img[0].clone().cpu().numpy().astype(np.uint8), cv.COLOR_Lab2RGB)).unsqueeze(0)
+             
+        def mirror_img(img, num) :
+            horizontal_flips = [0 for _ in range(num)]
+            horizontal_flips[0] = img if (num // 2) % 2 == 0 else img.flip(2)
+            for i in range(1,num) :
+                horizontal_flips[i] = horizontal_flips[i-1].flip(2)
+            center_row = torch.concat(horizontal_flips, dim=2)
+            vertical_flips = [0 for _ in range(num)]
+            vertical_flips[0] = center_row if (num // 2) % 2 == 0 else center_row.flip(1)
+            for i in range(1,num) :
+                vertical_flips[i] = vertical_flips[i-1].flip(1)
+            mirror = torch.concat(vertical_flips, dim=1)
+            return mirror
+            
+        def scale_img(img, scale_factor) :
+            if scale_factor == 1.0 :
+                return img
+            if scale_factor < 1.0 :
+                num_mirrors = int(np.ceil(1 / scale_factor))
+                if num_mirrors % 2 == 0 :
+                    num_mirrors += 1
+                img = mirror_img(img, num_mirrors)
+                scale_factor *= num_mirrors
+
+            new_height = int(img.shape[1] // scale_factor)
+            new_width = int(img.shape[2] // scale_factor)
+            center_height = img.shape[1] // 2
+            center_width = img.shape[2] // 2
+            img = img[:, center_height-new_height//2:center_height+new_height//2, center_width-new_width//2:center_width+new_width//2, :].type(torch.int)
+            return img
+            
         def process_img(img : Path | str | torch.types.Tensor) :
-            if isinstance(img, (Path, str)) :
-                img = torch.tensor(keras.utils.img_to_array(keras.utils.load_img(img)))
             if img.max() <= 1.0 :
                 img *= 255
-            if preserve_colors :
-                lab_img = rgb2lab(img) # The images are transformed into luminance-chrominance space
-                img = lab_img[:,:,0].unsqueeze(-1).repeat(1,1,3) # Repeat luminance channels 3 times to simulate an RGB image
             img = img.type(torch.int).unsqueeze(0).to(self.device)
-            if preserve_colors :
-                return img, lab_img
-            else :
-                return img
+            return img
+        
+
+        if isinstance(style_img, list) :
+            style_list = style_img    
+        else :
+            style_list = [style_img]
+
+        if isinstance(content_img, (Path, str)) :
+            content_img = torch.tensor(keras.utils.img_to_array(keras.utils.load_img(content_img)))
+        tmp_list = []
+        for style_img in style_list :
+            if isinstance(style_img, (Path, str)) :
+                style_img = torch.tensor(keras.utils.img_to_array(keras.utils.load_img(style_img)))
+            tmp_list.append(style_img)
+        style_list = tmp_list
+
+        content_img = process_img(content_img)
+        original_content_img = content_img.clone() # Save original image for later display
+        original_size = original_content_img.shape[1:3]
+        tmp_list = []
+        for i, style_img in enumerate(style_list) :
+            style_img = process_img(style_img)
+            tmp_list.append(style_img)
+        style_list = tmp_list
+        original_style_list = deepcopy(style_list)
+
+        if isinstance(style_scales, float) :
+            print('Bah oui konar')
+            style_scales = [style_scales for _ in range(len(style_list))]
+        if style_scales is None or not isinstance(style_scales, list) or len(style_scales) != len(style_list) :
+            style_scales = [1 for _ in range(len(style_list))]
+        tmp_list = []
+        for i, style_img in enumerate(style_list) :
+            tmp_list.append(scale_img(style_img, style_scales[i]))
+        style_list = tmp_list
         
         if preserve_colors :
-            content_img, original_content_lab = process_img(content_img)
-            if isinstance(style_img, list) : 
-                style_list, original_style_lab = [], []
-                for img in style_img :
-                    style_lum, style_lab = process_img(img)
-                    style_list.append(style_lum)
-                    original_style_lab.append(style_lab)
-                style_img = style_list
+            content_img = rgb2lab(content_img)[:,:,:,0].unsqueeze(-1).repeat(1,1,1,3) # The images are transformed into luminance-chrominance space (Luminance channel is repeated 3 times to simulate an RGB image)
+            tmp_list = []
+            for style_img in style_list :
+                tmp_list.append(rgb2lab(style_img)[:,:,:,0].unsqueeze(-1).repeat(1,1,1,3))
+            style_list = style_img
+
+        if resize_size is not None :
+            if keep_aspect_ratio :
+                if original_size[0] < original_size[1] :
+                    sec_size = int((original_size[1] / original_size[0]) * resize_size)
+                else :
+                    sec_size = resize_size
+                    resize_size = int((original_size[0] / original_size[1]) * sec_size)
             else :
-                style_img, original_style_lab = process_img(style_img)
-        else :
-            content_img = process_img(content_img)
-            if isinstance(style_img, list) : 
-                style_img = [process_img(img) for img in style_img]
-            else :
-                style_img = process_img(style_img)
+                sec_size = resize_size
+            print(original_size, (resize_size, sec_size))
+            content_img = F.interpolate(content_img.permute(0,3,1,2).type(torch.float), (resize_size, sec_size), mode='bilinear').permute(0,2,3,1).type(torch.int) # The content image is resized as a too small image could lead to artifacts in the generation, and a too big image will greatly increase computation time
 
         IMAGENET_MEANS = torch.tensor([103.939, 116.779, 123.68])
         with torch.no_grad() :
-            gen_img = self.call([content_img, style_img], training=False, alpha = alpha, style_weights=style_weights)
-            if gen_img.size() != content_img.size() : # The generated image might be a little smaller thant the original, due to the downscaling-upscaling process
-                gen_img = F.interpolate(gen_img.permute(0,3,1,2), content_img.shape[1:3], mode='bilinear').permute(0,2,3,1) 
+            gen_img = self.call([content_img, style_list], training=False, alpha = alpha, style_weights=style_weights, inference=True)
             gen_img += IMAGENET_MEANS.to(self.device) # The decoder generates images normalized around the ImageNet means for each channel
             gen_img = gen_img.flip(dims=[-1]) # Convert BGR to RGB
-            gen_img = gen_img.clamp(0,255).cpu().type(torch.int)[0]
+            gen_img = F.interpolate(gen_img.permute(0,3,1,2), original_size, mode='bilinear').permute(0,2,3,1)
+            gen_img = gen_img.clamp(0,255).cpu().type(torch.int)
            
             if preserve_colors :
-                out_luminance = rgb2lab(gen_img)[:,:,0] # To preserve colors, only the luminance of the output is considered
-                gen_img = original_content_lab.clone()
-                gen_img[:,:,0] = out_luminance # The generated luminance is applied to the initial content image chrominance
+                out_luminance = rgb2lab(gen_img)[:,:,:,0] # To preserve colors, only the luminance of the output is considered
+                gen_img = rgb2lab(original_content_img.clone())
+                gen_img[:,:,:,0] = out_luminance # The generated luminance is applied to the initial content image chrominance
                 gen_img = lab2rgb(gen_img)
+
+            gen_img = gen_img[0]
 
         torch.cuda.empty_cache()
         gc.collect()
 
         if show_img :
-            if preserve_colors : # The initial images are restored from their Lab representation to be correctly displayed
-                content_img = lab2rgb(original_content_lab).unsqueeze(0)
-                if isinstance(original_style_lab, list) :
-                    style_img = [lab2rgb(lab).unsqueeze(0) for lab in original_style_lab]
-                else :
-                    style_img = lab2rgb(original_style_lab).unsqueeze(0)
             if show_inputs :
-                if isinstance(style_img, list) :
-                    fig, axs = plt.subplots(1,2 + len(style_img), figsize=((2+len(style_img)) * 5, 5))
-                else :
-                    fig, axs = plt.subplots(1,3, figsize=(15, 5))
-
-                for ax in axs.ravel() :
+                fig, axs = plt.subplots(1,2 + len(original_style_list), figsize=((2+len(original_style_list)) * 5, 5))
+                axs = axs.ravel()
+                for ax in axs :
                     ax.axis('off')
-                axs[0].imshow(content_img.cpu()[0])
+                axs[0].imshow(original_content_img.cpu()[0])
                 axs[0].set_title('Content')
                 axs[-1].imshow(gen_img)
                 axs[-1].set_title('Generated image')
-                if isinstance(style_img, list) :
-                    for i, img in enumerate(style_img) :
-                        axs[i+1].imshow(img.cpu()[0])
-                        axs[i+1].set_title(f'Style image #{i+1}')
-                else :
-                    axs[1].imshow(style_img.cpu()[0])
-                    axs[1].set_title('Style')
+                for i, style_img in enumerate(original_style_list) :
+                    axs[i+1].imshow(style_img.cpu()[0])
+                    axs[i+1].set_title(f'Style image #{i+1}')
             else :
                 plt.imshow(gen_img)
                 plt.axis('off')
             plt.show()
         else :
             return gen_img
-
 
 
 class AdaINLoss() :
@@ -420,17 +468,24 @@ class AdaINLoss() :
         self.tv_weight = tv_weight
         self.reduction = reduction
 
-    def batched_euclidean_distance(self, tensor1, tensor2) :
-        """Compute the pairwise euclidean distances between two batches of Tensors
+    @staticmethod
+    def gram_matrix(features : torch.Tensor) :
+        """Compute the Gram matrix of a layer's features
 
         Args:
-            tensor1 (tensor): First tensor batch
-            tensor2 (tensor): Second tensor batch
+            features (torch.Tensor): Features to compute the Gram matrix on
 
         Returns:
-            tensor: The batched euvclidean distance
+            Tensor: The Gram matrix of the features
         """
-        return torch.sqrt(torch.sum((tensor1 - tensor2)**2, dim=(1,2,3)))
+        b, h, w, num_features = features.size()
+        # Gram matrix can be computed as the features multiplied by themselves transposed, under the condition that the features are a matrix of size num_features x num_elements_per_feature
+        matrix = features.permute(0,3,1,2).reshape(b, num_features, w*h)
+        matrix_t = matrix.transpose(1,2)
+        gram = matrix.bmm(matrix_t)
+        gram /= num_features * h * w
+        return gram
+
 
     @staticmethod
     def content_loss(generated_features, adain_output) :
@@ -462,12 +517,17 @@ class AdaINLoss() :
 
         style_loss = 0 #torch.zeros(generated_full_features[0].shape[0]).to(generated_full_features[0].device)
         for layer in range(len(generated_full_features)) :
-            gen_mean = instance_mean(generated_full_features[layer])
-            gen_std = instance_std(generated_full_features[layer])
-            style_mean = instance_mean(style_full_features[layer])
-            style_std = instance_std(style_full_features[layer])
+            # gen_mean = instance_mean(generated_full_features[layer])
+            # gen_std = instance_std(generated_full_features[layer])
+            # style_mean = instance_mean(style_full_features[layer])
+            # style_std = instance_std(style_full_features[layer])
             
-            style_loss += F.mse_loss(gen_mean, style_mean) + F.mse_loss(gen_std, style_std)
+            # style_loss += F.mse_loss(gen_mean, style_mean) + F.mse_loss(gen_std, style_std)
+            
+            style_feat = style_full_features[layer]
+            gen_feat = generated_full_features[layer]
+
+            style_loss += F.mse_loss(AdaINLoss.gram_matrix(gen_feat), AdaINLoss.gram_matrix(style_feat))
     
         return style_loss
     
