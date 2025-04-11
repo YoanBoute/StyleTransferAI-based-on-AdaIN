@@ -8,8 +8,8 @@ from pathlib import Path
 import json
 import pickle
 
-from adain_model import AdaINModel
-from adain_datamodule import AdaINDataModule
+from .adain_model import AdaINModel
+from .adain_datamodule import AdaINDataModule
 
 class AdaINTrainer() :
     def __init__(self, model : AdaINModel, data_module : AdaINDataModule, optimizer, mlflow_dir : Path = Path('./'), mlflow_tags : dict = {}) : 
