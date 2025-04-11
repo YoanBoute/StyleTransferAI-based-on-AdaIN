@@ -135,15 +135,15 @@ class VGGDecoder(Layer) :
         super().__init__()
         self.decoder = keras.Sequential((
             ReflectiveConv2D(256, (3,3), activation='relu'),
-            keras.layers.UpSampling2D(size=(2,2), data_format="channels_last", interpolation="bilinear"),
+            keras.layers.UpSampling2D(size=(2,2), data_format="channels_last", interpolation="nearest"),
             ReflectiveConv2D(256, (3,3), activation='relu'),
             ReflectiveConv2D(256, (3,3), activation='relu'),
             ReflectiveConv2D(256, (3,3), activation='relu'),
             ReflectiveConv2D(128, (3,3), activation='relu'),
-            keras.layers.UpSampling2D(size=(2,2), data_format="channels_last", interpolation="bilinear"),
+            keras.layers.UpSampling2D(size=(2,2), data_format="channels_last", interpolation="nearest"),
             ReflectiveConv2D(128, (3,3), activation='relu'),
             ReflectiveConv2D(64, (3,3), activation='relu'),
-            keras.layers.UpSampling2D(size=(2,2), data_format="channels_last", interpolation="bilinear"),
+            keras.layers.UpSampling2D(size=(2,2), data_format="channels_last", interpolation="nearest"),
             ReflectiveConv2D(64, (3,3), activation='relu'),
             ReflectiveConv2D(3, (3,3), activation=None)
 
@@ -282,7 +282,7 @@ class AdaINModel(Model) :
     def build(self, input_shape) :
         super().build(input_shape)
 
-    def call(self, inputs, training=False, alpha = 1.0, style_weights = None, inference = False) :
+    def call(self, inputs, alpha = 1.0, style_weights = None, inference = False) :
         content = inputs[0]
         content = keras.applications.vgg19.preprocess_input(content).to(self.device) # Make sure the format of input is compatible with VGG (BGR, mean-centered)
         encoded_content = self.encoder(content) 
@@ -319,7 +319,7 @@ class AdaINModel(Model) :
         
         return decoded_img
     
-    def generate(self, content_img : Path | str | torch.types.Tensor, style_img : Path | str | torch.types.Tensor | list, alpha = 1.0, style_weights = None, style_scales = 1, preserve_colors = False, resize_size = 1500, keep_aspect_ratio = False, show_img = False, show_inputs = False) :
+    def generate(self, content_img : Path | str | torch.types.Tensor, style_img : Path | str | torch.types.Tensor | list, alpha = 1.0, style_weights = None, style_scales = 1, preserve_colors = False, resize_size = 1500, keep_aspect_ratio = False, work_with_patches = False, patch_size = 256, patch_context_size = 512, patch_overlap = 0.5, patch_batch_size = 8, show_img = False, show_inputs = False) :
         def rgb2lab(img) :
             return torch.tensor(cv.cvtColor(img[0].clone().cpu().numpy().astype(np.uint8), cv.COLOR_RGB2Lab)).unsqueeze(0)
         
@@ -355,6 +355,52 @@ class AdaINModel(Model) :
             center_width = img.shape[2] // 2
             img = img[:, center_height-new_height//2:center_height+new_height//2, center_width-new_width//2:center_width+new_width//2, :].type(torch.int)
             return img
+        
+        def img_to_patches(img) :
+            _, H, W, _ = img.shape
+            stride = int(patch_size * (1 - patch_overlap))
+            pad_h = int((stride - ((H - (patch_size - stride)) % stride)) % stride)
+            pad_w = int((stride - ((W - (patch_size - stride)) % stride)) % stride)
+            context_pad = int((patch_context_size - patch_size) // 2)
+
+            padded_img = F.pad(img, (0, 0, context_pad, context_pad + pad_w, context_pad, context_pad + pad_h), mode='reflect')
+
+            patches = padded_img.unfold(1, patch_context_size, stride).unfold(2, patch_context_size, stride)
+            _, num_patches_h, num_patches_w, C, _, _ = patches.shape
+            patches = patches.permute(0,1,2,4,5,3).reshape(-1, patch_context_size, patch_context_size, C)
+
+            return patches, (num_patches_h, num_patches_w), (H,W), (pad_h, pad_w)
+        
+        def linear_ponderation_mask(size) :
+            y = torch.linspace(-1, 1, size)
+            x = torch.linspace(-1, 1, size)
+            xv, yv = torch.meshgrid(x, y, indexing="ij")
+            dist = torch.sqrt(xv**2 + yv**2)
+            mask = 1.0 - dist / dist.max() 
+            return (mask.clamp(min=0.0) + 1e-5).clamp(max=1.0)            
+
+        def patches_to_img(patches, grid_shape, original_shape, padding_on_original_img) :
+            crop = int((patch_context_size - patch_size) // 2)
+            patches =  patches[:, crop:crop+patch_size, crop:crop+patch_size, :]
+            num_patches_h, num_patches_w = grid_shape
+            H, W = original_shape
+            pad_h, pad_w = padding_on_original_img
+            stride = int(patch_size * (1-patch_overlap))
+
+            combined_img = torch.zeros(H + pad_h, W + pad_w, patches.shape[-1]).to(patches.device)
+            ponderations = torch.zeros_like(combined_img).to(patches.device)
+            ponderations_mask = linear_ponderation_mask(patch_size).unsqueeze(-1).expand(-1, -1, patches.shape[-1]).to(patches.device)
+
+            ix = 0
+            for i in range(num_patches_h) :
+                for j in range(num_patches_w) :
+                    x, y = i*stride, j*stride
+                    combined_img[x:x+patch_size, y:y+patch_size, :] += patches[ix] * ponderations_mask
+                    ponderations[x:x+patch_size, y:y+patch_size, :] += ponderations_mask
+
+                    ix += 1
+            
+            return (combined_img / ponderations)[:H, :W, :].unsqueeze(0)
             
         def process_img(img : Path | str | torch.types.Tensor) :
             if img.max() <= 1.0 :
@@ -388,7 +434,6 @@ class AdaINModel(Model) :
         original_style_list = deepcopy(style_list)
 
         if isinstance(style_scales, float) :
-            print('Bah oui konar')
             style_scales = [style_scales for _ in range(len(style_list))]
         if style_scales is None or not isinstance(style_scales, list) or len(style_scales) != len(style_list) :
             style_scales = [1 for _ in range(len(style_list))]
@@ -413,24 +458,36 @@ class AdaINModel(Model) :
                     resize_size = int((original_size[0] / original_size[1]) * sec_size)
             else :
                 sec_size = resize_size
-            print(original_size, (resize_size, sec_size))
             content_img = F.interpolate(content_img.permute(0,3,1,2).type(torch.float), (resize_size, sec_size), mode='bilinear').permute(0,2,3,1).type(torch.int) # The content image is resized as a too small image could lead to artifacts in the generation, and a too big image will greatly increase computation time
 
         IMAGENET_MEANS = torch.tensor([103.939, 116.779, 123.68])
-        with torch.no_grad() :
-            gen_img = self.call([content_img, style_list], training=False, alpha = alpha, style_weights=style_weights, inference=True)
-            gen_img += IMAGENET_MEANS.to(self.device) # The decoder generates images normalized around the ImageNet means for each channel
-            gen_img = gen_img.flip(dims=[-1]) # Convert BGR to RGB
-            gen_img = F.interpolate(gen_img.permute(0,3,1,2), original_size, mode='bilinear').permute(0,2,3,1)
-            gen_img = gen_img.clamp(0,255).cpu().type(torch.int)
-           
-            if preserve_colors :
-                out_luminance = rgb2lab(gen_img)[:,:,:,0] # To preserve colors, only the luminance of the output is considered
-                gen_img = rgb2lab(original_content_img.clone())
-                gen_img[:,:,:,0] = out_luminance # The generated luminance is applied to the initial content image chrominance
-                gen_img = lab2rgb(gen_img)
+        
+        if work_with_patches :
+            content_patches, grid_shape, original_shape, padding = img_to_patches(content_img)
+            stylized_patches = []
+            for i in range(0, len(content_patches), patch_batch_size) :
+                content_batch = content_patches[i:i+patch_batch_size]
+                style_batch_list = [style.expand(content_batch.shape[0], -1, -1, -1) for style in style_list]
+                with torch.no_grad() :
+                    stylized_patches.append(self.call([content_batch, style_batch_list], alpha = alpha, style_weights=style_weights, inference=True))
+            stylized_patches = torch.cat(stylized_patches, dim=0)
+            stylized_patches = F.interpolate(stylized_patches.permute(0,3,1,2), (content_patches.shape[1], content_patches.shape[2]), mode='bilinear').permute(0,2,3,1)
+            gen_img = patches_to_img(stylized_patches, grid_shape, original_shape, padding)
+        else :
+            with torch.no_grad() :
+                gen_img = self.call([content_img, style_list], alpha = alpha, style_weights=style_weights, inference=True)
+        gen_img += IMAGENET_MEANS.to(self.device) # The decoder generates images normalized around the ImageNet means for each channel
+        gen_img = gen_img.flip(dims=[-1]) # Convert BGR to RGB
+        gen_img = F.interpolate(gen_img.permute(0,3,1,2), original_size, mode='bilinear').permute(0,2,3,1)
+        gen_img = gen_img.clamp(0,255).cpu().type(torch.int)
+        
+        if preserve_colors :
+            out_luminance = rgb2lab(gen_img)[:,:,:,0] # To preserve colors, only the luminance of the output is considered
+            gen_img = rgb2lab(original_content_img.clone())
+            gen_img[:,:,:,0] = out_luminance # The generated luminance is applied to the initial content image chrominance
+            gen_img = lab2rgb(gen_img)
 
-            gen_img = gen_img[0]
+        gen_img = gen_img[0]
 
         torch.cuda.empty_cache()
         gc.collect()
