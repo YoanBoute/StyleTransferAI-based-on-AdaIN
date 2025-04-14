@@ -5,14 +5,19 @@ import asyncio
 from pathlib import Path
 import base64
 import json
+import uuid
 
-img1 = Path('D:/StyleTransferAI/StyleTransferAI/test_images/sunset2.jpg')
+img1 = Path('D:/StyleTransferAI/StyleTransferAI/test_images/wolf_forest.jpg')
 img2 = Path('D:/StyleTransferAI/StyleTransferAI/test_images/impressionisme.jpg')
-img3 = Path('D:/StyleTransferAI/StyleTransferAI/test_images/scream.jpg')
+img3 = Path('D:/StyleTransferAI/StyleTransferAI/test_images/oil_paint.jpg')
 
-# TODO : Add an authentification method (token / connection / ...)
+# TODO : 
+# - Add an authentification method (token / connection / ...)
+# - Encapsulate file data in a class / dict (With extension, size, ...)
+# - Reconnect to the Websockets every once in a while
 
 async def generate() :
+    client_id = uuid.uuid4().hex
     async with connect("ws://localhost:8000/generate", max_size=5*1024*1024) as websocket : # TODO : Change port number
         with open(img1, 'rb') as f :
             data1 = base64.b64encode(f.read()).decode("utf-8")
@@ -21,18 +26,26 @@ async def generate() :
         with open(img3, 'rb') as f :
             data3 = base64.b64encode(f.read()).decode("utf-8")
         message1 = { # TODO : Add client ID
-            "request_id" : 'test1',
+            "client_id" : client_id,
             "content" : data1,
             "style" : [
                 data2
-            ]
+            ],
+            "params" : {
+                'alpha' : 0.5,
+                'preserve_colors' : True
+                }
         }
         message2 = { 
-            "request_id" : 'test1',
+            "client_id" : client_id,
             "content" : data1,
             "style" : [
                 data3
-            ]
+            ],
+            "params" : {
+                'alpha' : 2,
+                'preserve_colors' : False
+                }
         }
         print("Send first request")
         await websocket.send(json.dumps(message1))
