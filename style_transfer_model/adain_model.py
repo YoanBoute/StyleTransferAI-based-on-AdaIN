@@ -184,8 +184,8 @@ class AdaINModel(Model) :
         self.output_shape = (None, None, None, 3)
         self.build(input_shape=[(None, 256, 256, 3), (None, 256, 256, 3)])
 
-    @staticmethod
-    def load_registered_model(model_name, version_or_alias, mlflow_tracking_uri) :
+    @classmethod
+    def load_registered_model(cls, model_name, version_or_alias, mlflow_tracking_uri) :
         mlflow.set_tracking_uri(mlflow_tracking_uri)
         client = mlflow.MlflowClient()
         if type(version_or_alias) == int :
@@ -194,7 +194,7 @@ class AdaINModel(Model) :
             model_info = client.get_model_version_by_alias(model_name, version_or_alias)
         
         run_id = model_info.run_id
-        return AdaINModel.load_from_mlflow(run_id, mlflow_tracking_uri)
+        return cls.load_from_mlflow(run_id, mlflow_tracking_uri)
 
     @staticmethod
     def load_from_mlflow(run_id, mlflow_tracking_uri) :

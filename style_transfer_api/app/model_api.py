@@ -10,7 +10,7 @@ from mlflow.tracking import MlflowClient
 from pathlib import Path
 from ...style_transfer_model.adain_model import AdaINModel 
 import fastapi
-from fastapi import FastAPI, File, UploadFile, WebSocket
+from fastapi import FastAPI, WebSocket
 from fastapi.responses import FileResponse
 import base64
 import json
@@ -21,6 +21,7 @@ import psutil
 import time
 import numpy as np
 import uuid
+from ..utils.file import File
 
 MLFLOW_TRACK_URI = Path("D:/Python/ML Flow/mlruns")
 TMP_DIR = Path("./__tmp")
@@ -29,8 +30,6 @@ TMP_DIR.mkdir(exist_ok=True)
 
 # TODO : 
 # - Store generated images for each client for a certain amount of days
-# - Handle multiple style files in a single request
-# - Encapsulate file processing instructions in a function
 # - Add a function to process and secure the received parameters (remove non existing parameters)
 
 def switch_model_to_device(device, model) :
@@ -39,10 +38,10 @@ def switch_model_to_device(device, model) :
     model.device = device
     return model
 
-def generate_img(content, style, result_queue, **params) :
+def generate_img(content, styles, result_queue, **params) :
     model = AdaINModel.load_registered_model("StyleTransfer", "champion", MLFLOW_TRACK_URI)
     model = switch_model_to_device("cpu", model)
-    stylized = model.generate(content, style, resize_size = 1500, **params).numpy()
+    stylized = model.generate(content, styles, resize_size = 1500, **params).numpy()
     result_queue.put(stylized)
 
 class RequestManager :
@@ -68,10 +67,10 @@ class RequestManager :
                 pass            
             del self.tasks[client_id]
 
-    async def start_task(self, client_id, content, style, params) :
+    async def start_task(self, client_id, content, styles, params) :
         await self.cancel_task(client_id)
         res_queue = Queue()   
-        process = Process(target=generate_img, args=(content, style, res_queue), kwargs={**params}) 
+        process = Process(target=generate_img, args=(content, styles, res_queue), kwargs={**params}) 
         process.start()
         self.processes[client_id] = process
         task = asyncio.create_task(self._monitor_task(process, res_queue, client_id))
@@ -96,22 +95,18 @@ def test() :
 
 @app.websocket('/generate') 
 async def endpoint(ws : WebSocket) :
-    async def generation(client_id, request_id, content, style, params) :
+    async def generation(client_id, request_id, content, styles, params) :
         gen_path = TMP_DIR / ('gen_' + client_id + request_id + '.jpg')
-        gen_task = await manager.start_task(client_id, content, style, params)
+        gen_task = await manager.start_task(client_id, content, styles, params)
         try :
             gen_img = await gen_task
             keras.utils.save_img(gen_path, gen_img)
-            with open(gen_path, 'rb') as f :
-                gen_data = base64.b64encode(f.read()).decode('utf-8')
+            gen_file = File.from_path(gen_path)
             response = {
                 "client_id" : client_id,
                 "status" : "success",
-                "generated_image" : gen_data
+                "generated_image" : gen_file.model_dump()
             }
-            content.unlink(missing_ok=True)
-            style.unlink(missing_ok=True)
-            gen_path.unlink(missing_ok=True)
             await ws.send_text(json.dumps(response))
         except asyncio.exceptions.CancelledError :
             response = {
@@ -125,10 +120,12 @@ async def endpoint(ws : WebSocket) :
                 "status" : "error",
                 "message" : str(e)
             }
+            print(e)
             await ws.send_text(json.dumps(response))
-        finally :    
+        finally :        
             content.unlink(missing_ok=True)
-            style.unlink(missing_ok=True)
+            for style in styles :
+                style.unlink(missing_ok=True)
             gen_path.unlink(missing_ok=True)
         
     await ws.accept()
@@ -136,24 +133,30 @@ async def endpoint(ws : WebSocket) :
         client_id = "unknown"
         try :
             data = await ws.receive_text()
-            request_id = uuid.uuid4().hex # The request_id is used to differentiate the requests made by a same client in a short time (especially for file handling)
             message = json.loads(data)
             client_id = message["client_id"]
-            content = base64.b64decode(message["content"])
-            content_path = TMP_DIR / ('content_' + client_id + request_id + '.jpg')
-            # TODO : Retrieve file true extension to use it for saving the file
-            with open(content_path, 'wb') as f :
-                f.write(content)
-            style = base64.b64decode(message["style"][0])
-            style_path = TMP_DIR / ('style_' + client_id + request_id + '.jpg')
-            with open(style_path, 'wb') as f :
-                f.write(style)
+            request_id = uuid.uuid4().hex # The request_id is used to differentiate the requests made by a same client in a short time (especially for file handling)
+            content = File.from_dict(message["content"])
+            content_path = TMP_DIR / ('content_' + client_id + request_id)
+            content_path = content.save_to(content_path)
+            # style = File.from_dict(message["style"][0])
+            # style_path = TMP_DIR / ('style_' + client_id + request_id)
+            # style_path = style.save_to(style_path)
+            styles = [File.from_dict(style_file) for style_file in message["style"]]
+            style_paths = [TMP_DIR / ('style_' + client_id + request_id + f'_{i}') for i in range(len(styles))]
+            style_paths = [style.save_to(style_paths[i]) for i, style in enumerate(styles)]
             gen_params = message["params"]
-            asyncio.create_task(generation(client_id, request_id, content=content_path, style=style_path, params=gen_params))            
+            asyncio.create_task(generation(client_id, request_id, content=content_path, styles=style_paths, params=gen_params))            
         except Exception as e :
             response = {
                 "client_id" : client_id,
                 "status" : "error",
                 "message" : str(e)
             }
+            print(e)
             await ws.send_text(json.dumps(response))
+            if 'content_path' in locals() :       
+                content_path.unlink(missing_ok=True)
+            if 'style_paths' in locals() : 
+                for style in style_paths :
+                    style.unlink(missing_ok=True)
