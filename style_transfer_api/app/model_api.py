@@ -31,6 +31,7 @@ TMP_DIR.mkdir(exist_ok=True)
 # TODO : 
 # - Store generated images for each client for a certain amount of days
 # - Add a function to process and secure the received parameters (remove non existing parameters)
+# - Cancel task if connection with client is lost / closed
 
 def switch_model_to_device(device, model) :
     keras.src.backend.common.global_state.set_global_attribute("torch_device", device)
