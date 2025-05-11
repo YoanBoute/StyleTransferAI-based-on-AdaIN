@@ -42,7 +42,7 @@ def switch_model_to_device(device, model) :
 def generate_img(content, styles, result_queue, **params) :
     model = AdaINModel.load_registered_model("StyleTransfer", "champion", MLFLOW_TRACK_URI)
     model = switch_model_to_device("cpu", model)
-    stylized = model.generate(content, styles, resize_size = 1500, **params).numpy()
+    stylized = model.generate(content, styles, **params).numpy()
     result_queue.put(stylized)
 
 class RequestManager :

@@ -1,8 +1,11 @@
 from pathlib import Path
 import base64
 from pydantic import BaseModel
-from file import File
-
+try :
+    from file import File
+except :
+    from utils.file import File
+    
 class Request(BaseModel) :
     client_id : str
     content_img : File
