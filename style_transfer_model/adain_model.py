@@ -319,7 +319,7 @@ class AdaINModel(Model) :
         
         return decoded_img
     
-    def generate(self, content_img : Path | str | torch.types.Tensor, style_img : Path | str | torch.types.Tensor | list, alpha = 1.0, style_weights = None, style_scales = 1, preserve_colors = False, resize_size = 1500, keep_aspect_ratio = False, work_with_patches = False, patch_size = 256, patch_context_size = 512, patch_overlap = 0.5, patch_batch_size = 8, show_img = False, show_inputs = False) :
+    def generate(self, content_img : Path | str | torch.types.Tensor, style_img : Path | str | torch.types.Tensor | list, alpha = 1.0, style_weights = None, style_scales = 1, preserve_colors = False, resize_size = 1500, keep_aspect_ratio = False, patches = False, patch_size = 256, patch_context_size = 512, patch_overlap = 0.5, patch_batch_size = 8, show_img = False, show_inputs = False) :
         def rgb2lab(img) :
             return torch.tensor(cv.cvtColor(img[0].clone().cpu().numpy().astype(np.uint8), cv.COLOR_RGB2Lab)).unsqueeze(0)
         
@@ -462,7 +462,7 @@ class AdaINModel(Model) :
 
         IMAGENET_MEANS = torch.tensor([103.939, 116.779, 123.68])
         
-        if work_with_patches :
+        if patches :
             content_patches, grid_shape, original_shape, padding = img_to_patches(content_img)
             stylized_patches = []
             for i in range(0, len(content_patches), patch_batch_size) :

@@ -1,6 +1,9 @@
 from pathlib import Path
 import base64
 from pydantic import BaseModel
+from datetime import datetime
+import re
+import mimetypes
 
 class File(BaseModel) :
     filename : str
@@ -18,6 +21,14 @@ class File(BaseModel) :
     @classmethod
     def from_dict(cls, file : dict) :
         return cls(**file)
+    
+    @classmethod
+    def from_url(cls, file : str) :
+        return cls(
+            filename = f'tmp_{datetime.now()}',
+            extension = mimetypes.guess_extension(re.findall(r'data:(.*);', file)[0]),
+            data = re.findall(r'base64,(.*)', file)[0]
+        )
     
     def save_to(self, dst_path : Path) :
         dst_path.parent.mkdir(parents=True, exist_ok=True)

@@ -90,10 +90,6 @@ class RequestManager :
 app = FastAPI()
 manager = RequestManager()
 
-@app.get("/")
-def test() :
-    return {"msg" : "Hello world"}
-
 @app.websocket('/generate') 
 async def endpoint(ws : WebSocket) :
     async def generation(client_id, request_id, content, styles, params) :
