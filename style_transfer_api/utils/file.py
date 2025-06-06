@@ -32,8 +32,11 @@ class File(BaseModel) :
     
     def save_to(self, dst_path : Path) :
         dst_path.parent.mkdir(parents=True, exist_ok=True)
+        print("yes")
         dst_path = dst_path.with_suffix(self.extension)
         with open(dst_path, 'wb') as f :
+            print("no")
             f.write(base64.b64decode(self.data))
+        print("allright")
         return dst_path
 

@@ -22,6 +22,7 @@ import time
 import numpy as np
 import uuid
 from ..utils.file import File
+from ..utils.requests import Request, Response, GenerationStatus
 
 MLFLOW_TRACK_URI = Path("D:/Python/ML Flow/mlruns")
 TMP_DIR = Path("./__tmp")
@@ -99,59 +100,40 @@ async def endpoint(ws : WebSocket) :
             gen_img = await gen_task
             keras.utils.save_img(gen_path, gen_img)
             gen_file = File.from_path(gen_path)
-            response = {
-                "client_id" : client_id,
-                "status" : "success",
-                "generated_image" : gen_file.model_dump()
-            }
-            await ws.send_text(json.dumps(response))
+            response = Response(request_id=request_id, status=GenerationStatus.success, message="Image generated successfully", generated_image=gen_file) 
         except asyncio.exceptions.CancelledError :
-            response = {
-                "client_id" : client_id,
-                "status" : "cancelled"
-            }
-            await ws.send_text(json.dumps(response))
+            response = Response(request_id=request_id, status=GenerationStatus.cancel, message="Generation was cancelled")
         except Exception as e :
-            response = {
-                "client_id" : client_id,
-                "status" : "error",
-                "message" : str(e)
-            }
+            response = Response(request_id=request_id, status=GenerationStatus.error, message=str(e))
             print(e)
-            await ws.send_text(json.dumps(response))
         finally :        
             content.unlink(missing_ok=True)
             for style in styles :
                 style.unlink(missing_ok=True)
             gen_path.unlink(missing_ok=True)
+            await ws.send_text(json.dumps(response.model_dump()))
         
     await ws.accept()
     while True:
         client_id = "unknown"
         try :
-            data = await ws.receive_text()
-            message = json.loads(data)
-            client_id = message["client_id"]
-            request_id = uuid.uuid4().hex # The request_id is used to differentiate the requests made by a same client in a short time (especially for file handling)
-            content = File.from_dict(message["content"])
+            req = await ws.receive_text()
+            req_dict = json.loads(req)
+            request = Request.from_dict(req_dict)
+            client_id = request.client_id
+            request_id = request.request_id
+            content = request.content_img
             content_path = TMP_DIR / ('content_' + client_id + request_id)
             content_path = content.save_to(content_path)
-            # style = File.from_dict(message["style"][0])
-            # style_path = TMP_DIR / ('style_' + client_id + request_id)
-            # style_path = style.save_to(style_path)
-            styles = [File.from_dict(style_file) for style_file in message["style"]]
+            styles = [style_file for style_file in request.style_imgs]
             style_paths = [TMP_DIR / ('style_' + client_id + request_id + f'_{i}') for i in range(len(styles))]
             style_paths = [style.save_to(style_paths[i]) for i, style in enumerate(styles)]
-            gen_params = message["params"]
+            gen_params = request.params
             asyncio.create_task(generation(client_id, request_id, content=content_path, styles=style_paths, params=gen_params))            
         except Exception as e :
-            response = {
-                "client_id" : client_id,
-                "status" : "error",
-                "message" : str(e)
-            }
+            response = Response(request_id=request_id, status=GenerationStatus.error, message=str(e))
             print(e)
-            await ws.send_text(json.dumps(response))
+            await ws.send_text(json.dumps(response.model_dump()))
             if 'content_path' in locals() :       
                 content_path.unlink(missing_ok=True)
             if 'style_paths' in locals() : 

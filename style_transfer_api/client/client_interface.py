@@ -5,11 +5,9 @@ import json
 import asyncio
 import websockets
 from websockets.asyncio.client import connect
-from typing import List, Dict, Any, Optional
-from dataclasses import dataclass, field
 from utils.file import File
+from utils.requests import Request, Response, GenerationStatus
 import base64
-from copy import deepcopy
 from functools import partial
 
 """ 
@@ -19,12 +17,17 @@ from functools import partial
 
 - Layout changes
     - Control images dimensions to have always same height style blocks and content block
+    - Add a loading animation during generation (transparent layer over existing image ?)
     - Handle Add style button width depending on number of visible blocks
     - Adapt slider value display min width to fit to the max value
     - Center alpha slider and generate button
+    - Add a cancel button visible only when a generation is in progress
     - Add titles to the interface components
-- Use Requests and Responses objects to communicate
-- Auto adjust style weights to have them summed to 1
+    - Place the parameters in a pop-up window
+    - Find a better way to print generation status (and eventually message) -> As a notification maybe ?
+- Auto adjust style weights to have them summed to 1 (And change their default value to be 1/#visible blocks)
+- Make weight slider for style blocks visible only if more than 1 block is visible
+- Add the possibility to view images in full screen, and a download button on non-interactive ones
 - Provide a French / English translation
 """
 
@@ -227,7 +230,7 @@ class StyleBlocksRow :
 class ParamsBlock :
     def __init__(self):
         with ui.column().classes('w-full') as self.block :
-            with ui.column().classes('w-4/5 flex flex-row justify-center') :
+            with ui.column().classes('w-4/5 m-a') :
                 self.alpha = LabeledSlider('Importance of stylization', 0, 1, 0.05, 1)
             with ui.row().classes('w-full flex justify-around') :
                 with ui.column(align_items='stretch').classes('w-2/5') :
@@ -275,35 +278,30 @@ class StyleTransferApp:
                     self.info_message = ui.textarea("Message").classes('w-full')
                     self.info_message.props('readonly')
     
-    def get_params_dict(self) :
+    def generate_request(self) :
         content = File.from_url(self.content.source).model_dump()
         styles = [File.from_url(s.img.source).model_dump() for s in self.style_blocks if s.visible and s.img.source is not None]
         params = self.style_blocks.get_params_dict() | self.params_block.get_params_dict()
-        return {
-            "client_id" : self.client_id,
-            "content" : content,
-            "style" : styles,
-            "params" : params
-        }
+        return Request(client_id=self.client_id, content_img=content, style_imgs=styles, params=params)
     
     async def generate_img(self) :
-        request = self.get_params_dict()
+        request = self.generate_request()
         async with connect(self.api_endpoint, max_size=50*1024*1024) as websocket :
-            task = await asyncio.create_task(self.handle_request(websocket, request))
+            await asyncio.create_task(self.handle_request(websocket, request))
 
-    async def handle_request(self, connection, request) :
+    async def handle_request(self, connection, request : Request) :
         try :
-            await connection.send(json.dumps(request))
+            await connection.send(json.dumps(request.model_dump()))
             try:
-                response = await connection.recv()
-                print("Response received !")
-                msg = json.loads(response)
-                if msg.get("status") in ("success"):
-                    gen_file = File.from_dict(msg["generated_image"])
+                resp = await connection.recv()
+                resp_dict = json.loads(resp)
+                response = Response.from_dict(resp_dict)
+                if response.status == GenerationStatus.success :
+                    gen_file = response.generated_image
                     gen_img_path = gen_file.save_to(Path('D:/StyleTransferAI/StyleTransferAI_AdaIN/StyleTransferAI-based-on-AdaIN/style_transfer_api/tmp/resp'))
                     self.generated_img.source = gen_img_path
-                self.status_message.value = msg.get("status")
-                self.info_message.value = msg.get("message")
+                self.status_message.value = response.status
+                self.info_message.value = response.message
             except websockets.ConnectionClosed:
                 self.generated_img.source = None
                 self.status_message.value = "Connection closed"
