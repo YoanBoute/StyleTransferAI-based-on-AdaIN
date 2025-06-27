@@ -17,17 +17,20 @@ from functools import partial
 
 - Layout changes
     - Control images dimensions to have always same height style blocks and content block
-    - Add a loading animation during generation (transparent layer over existing image ?)
+    - Add a loading animation during generation (transparent layer over existing image or spinner on button)
     - Handle Add style button width depending on number of visible blocks
     - Adapt slider value display min width to fit to the max value
-    - Center alpha slider and generate button
     - Add a cancel button visible only when a generation is in progress
     - Add titles to the interface components
+    - Center style images under the content image
     - Place the parameters in a pop-up window
     - Find a better way to print generation status (and eventually message) -> As a notification maybe ?
-- Auto adjust style weights to have them summed to 1 (And change their default value to be 1/#visible blocks)
-- Make weight slider for style blocks visible only if more than 1 block is visible
+    - Make the "Fix value" more compact (with an explicit togglable logo)
+- Add a "Reset weights" button
+- Limit the precision of displayed values to 2 numbers
 - Add the possibility to view images in full screen, and a download button on non-interactive ones
+- Handle invalid requests (missing style / content)
+- Keep the previously generated images for as long as the interface is open
 - Provide a French / English translation
 """
 
@@ -35,13 +38,15 @@ API_URL = "ws://localhost:8000/generate"
 
 class LabeledSlider :
     """Custom component with linked slider and displayed value, along with a label"""
-    def __init__(self, label, min_value, max_value, step, default_value):
-        with ui.column().classes('w-full gap-1'):
+    def __init__(self, label, min_value, max_value, step, default_value, fix_option = False):
+        with ui.column().classes('w-full gap-1') as self.block :
             ui.label(label).classes('text-sm w-full').props('dense')
             with ui.row().classes('w-full gap-5 flex items-center') :
                 self.slider = ui.slider(min=min_value, max=max_value, step=step, value=default_value).classes('flex-1')
                 self.slider._props['color'] = 'deep-orange'
                 self.value_display = ui.number(value=default_value, precision=2, step=step).bind_value(self.slider, 'value').style('width: 70px; min-width: 70px;').props('dense outlined')  
+                if fix_option :
+                    self.fix_btn = Checkbox('Fix value')
 
     @property
     def value(self) :
@@ -58,6 +63,21 @@ class LabeledSlider :
     @enabled.setter
     def enabled(self, value) :
         self.slider.enabled = value
+        self.value_display.enabled = value
+    
+    @property 
+    def visible(self) :
+        return self.block.visible
+    
+    @visible.setter
+    def visible(self, value) :
+        self.block.visible = value
+    
+    @property
+    def is_fixed(self) :
+        if self.__dict__.get("fix_btn") is None :
+            return False
+        return self.fix_btn.value
 
 
 class Checkbox :
@@ -80,6 +100,9 @@ class Checkbox :
     @enabled.setter
     def enabled(self, value) :
         self.box.enabled = value
+    
+    def on_value_change(self, handler) :
+        self.box.on_value_change(handler)
 
 
 class ImageComponent :
@@ -98,7 +121,7 @@ class ImageComponent :
             self.disp_img = ui.interactive_image(self.placeholder_img).classes('border-solid border-2 rounded border-orange-500 w-full p-1')
         self.file.on_upload(self.update_img)
         self.disp_img.bind_source_from(self.file, "value")
-    
+
     def update_img(self, e) :
         image_bytes = e.content.read()
         encoded_image = base64.b64encode(image_bytes).decode('utf-8')
@@ -107,6 +130,7 @@ class ImageComponent :
         self.source = base64_url
         self.close_btn.visible = True
         e.sender.reset() # Clear cache to avoid problems with re-uploading the same file
+        ui.run_javascript(f"emitEvent('image-{self.disp_img.id}-update')")
 
     def open_file_box(self) :
         js_code = f"""var uploader = getHtmlElement("{self.file.id}").querySelector("input[type=file]").click();"""
@@ -115,6 +139,7 @@ class ImageComponent :
     def reset_image(self) :
         self.disp_img.set_source(self.placeholder_img)
         self.close_btn.visible = False
+        ui.run_javascript(f"emitEvent('image-{self.disp_img.id}-reset')")
     
     def classes(self, add : str = "", *, remove : str = "") :
         self.disp_img.classes(add=add, remove=remove)
@@ -127,25 +152,42 @@ class ImageComponent :
     @source.setter
     def source(self, value) :
         self.disp_img.source = value
-        self.disp_img.force_reload()
+        # self.disp_img.force_reload()
 
 
 class StyleBlock :
     def __init__(self, visible) :
         with ui.card() as self.block :
             self.img = ImageComponent(user_interactive=True)
-            self.weight = LabeledSlider('Weight', 0, 1, 0.01, 1)
+            self.weight = LabeledSlider('Weight', 0, 1, 0.01, 1, fix_option=True)
+            self.weight.visible = False # Weight slider should only appear if multiple styles are displayed
+            self.weight.enabled = False
             self.scale = LabeledSlider('Scale', 0.1, 3, 0.1, 1)
+            self.scale.enabled = False
             self.rmv_btn = ui.button('Remove style').classes('w-full')
             self.rmv_btn._props['color'] = 'deep-orange'
+            self.rmv_btn.visible = False
         self.block.visible = visible
-        self.rmv_btn.visible = False
+        ui.on(f"image-{self.img.disp_img.id}-update", self.activate_sliders)
+        ui.on(f"image-{self.img.disp_img.id}-reset", self.deactivate_sliders)
 
     def reset(self) :
         self.img.reset_image()
         self.weight.value = 1
         self.scale.value = 1
     
+    def activate_sliders(self) :
+        self.weight.enabled = True
+        self.scale.enabled = True
+        ui.run_javascript(f"emitEvent('weights-{self.weight.slider.id}-added')")
+
+    def deactivate_sliders(self) :
+        self.weight.enabled = False
+        self.scale.enabled = False
+        ui.run_javascript("emitEvent('weights-removed')")
+        self.weight.value = 1
+        self.scale.value = 1
+
     def classes(self, add : str = "", *, remove : str = "") :
         self.block.classes(add=add, remove=remove)
         return self
@@ -157,6 +199,10 @@ class StyleBlock :
     @visible.setter
     def visible(self, value) :
         self.block.visible = value
+
+    @property
+    def is_valid(self) :
+        return self.visible and self.img.source != self.img.placeholder_img
 
 
 class StyleBlocksRow :
@@ -170,14 +216,17 @@ class StyleBlocksRow :
         self.num_visible = 1
         for i in range(self.max_styles) :
             self.style_blocks[i].rmv_btn.on_click(partial(self.remove_block, i))
-        print(self.style_blocks[0].rmv_btn.on_click)
+            self.style_blocks[i].weight.slider.on("change", partial(self.update_weight_values, i, True))
+            self.style_blocks[i].weight.value_display.on("change", partial(self.update_weight_values, i, True))
+            ui.on(f"weights-{self.style_blocks[i].weight.slider.id}-added", partial(self.update_weight_values, i, block_added = True))
+        ui.on("weights-removed", self.update_weight_values)
 
     def __iter__(self) :
         return self.style_blocks.__iter__()
     
     def __getitem__(self, ix) :
         return self.style_blocks[ix]
-    
+
     def copy_block(self, src_ix, target_ix) :
         src_block = self.style_blocks[src_ix]
         target_block = self.style_blocks[target_ix]
@@ -192,6 +241,7 @@ class StyleBlocksRow :
         if self.num_visible > 1 :
             for style_block in self.style_blocks :
                 style_block.rmv_btn.visible = True
+                style_block.weight.visible = True
         width_class_to_remove = self.current_width_class
         self.current_width_class = f'w-1/{min(self.num_visible + 1, self.max_styles)}'
         for i in range(self.num_visible) :
@@ -212,13 +262,55 @@ class StyleBlocksRow :
         if self.num_visible <= 1 : 
             for style_block in self.style_blocks :
                 style_block.rmv_btn.visible = False
+                style_block.weight.visible = False
         self.add_btn.visible = True
+        self.update_weight_values()
+
+    def update_weight_values(self, style_ix = None, fix_value = False, block_added = False) :
+        """When the value of a weight slider is changed, proportionnally adjust the others to maintain a sum of 1
+
+        Args:
+            style_ix (int): Index of the updated style weight
+            new_weight (float): New value of the updated style weight
+        """
+        if fix_value :
+            self.style_blocks[style_ix].weight.fix_btn.value = True
+
+        previous_values = {}
+        fixed_weights = []
+        for i in range(self.num_visible) :
+            if i == style_ix or not self.style_blocks[i].is_valid :
+                continue
+            if self.style_blocks[i].weight.is_fixed :
+                fixed_weights.append(self.style_blocks[i].weight.value)
+            else :
+                previous_values[i] = self.style_blocks[i].weight.value
+        
+        total_fixed_weight = sum(fixed_weights)
+        # if style_ix is not None :
+        #     self.style_blocks[style_ix].weight.value = min(self.style_blocks[style_ix].weight.value, 1 - total_fixed_weight)
+        remaining_weight = 1 - self.style_blocks[style_ix].weight.value if style_ix is not None and not block_added else 1
+        remaining_weight -= total_fixed_weight
+        remaining_weight = max(0, remaining_weight)
+        
+        previous_total_weight = sum(list(previous_values.values()))
+        if block_added and len(set(previous_values.values())) == 1 :
+            new_value = remaining_weight / (len(previous_values) + 1)
+            self.style_blocks[style_ix].weight.value = new_value
+            for i in previous_values.keys() :
+                self.style_blocks[i].weight.value = new_value
+        elif previous_total_weight == 0 :
+            for i, prev_value in previous_values.items() :
+                self.style_blocks[i].weight.value = remaining_weight / len(previous_values)
+        else :
+            for i, prev_value in previous_values.items() :
+                self.style_blocks[i].weight.value = prev_value * remaining_weight / previous_total_weight
 
     def get_params_dict(self) :
         style_weights = []
         style_scales = []
         for block in self.style_blocks :
-            if block.visible and block.img.source is not None :
+            if block.is_valid :
                 style_weights.append(block.weight.value)
                 style_scales.append(block.scale.value)
         return {
@@ -230,7 +322,7 @@ class StyleBlocksRow :
 class ParamsBlock :
     def __init__(self):
         with ui.column().classes('w-full') as self.block :
-            with ui.column().classes('w-4/5 m-a') :
+            with ui.column().classes('w-4/5 block m-auto') :
                 self.alpha = LabeledSlider('Importance of stylization', 0, 1, 0.05, 1)
             with ui.row().classes('w-full flex justify-around') :
                 with ui.column(align_items='stretch').classes('w-2/5') :
@@ -270,8 +362,12 @@ class StyleTransferApp:
             with ui.column().classes('w-2/5') :
                 with ui.card().classes('w-full') :
                     self.generated_img = ImageComponent(False)
-                    self.gen_btn = ui.button('Generate image', on_click=self.generate_img).classes('flex justify-center')
+                    self.gen_btn = ui.button('Generate image', on_click=self.generate_img).classes('block m-auto')
                     self.gen_btn._props['color'] = 'deep-orange'
+                with ui.card().classes('w-full') as self.warning_block :
+                    self.warning = ui.textarea("Warning").classes('w-full')
+                    self.warning.props("readonly")
+                    ui.timer(0.5, self.check_for_warnings)
                 with ui.card().classes('w-full') :
                     self.status_message = ui.textarea("Status").classes('w-full')
                     self.status_message.props('readonly')
@@ -280,7 +376,7 @@ class StyleTransferApp:
     
     def generate_request(self) :
         content = File.from_url(self.content.source).model_dump()
-        styles = [File.from_url(s.img.source).model_dump() for s in self.style_blocks if s.visible and s.img.source is not None]
+        styles = [File.from_url(s.img.source).model_dump() for s in self.style_blocks if s.is_valid]
         params = self.style_blocks.get_params_dict() | self.params_block.get_params_dict()
         return Request(client_id=self.client_id, content_img=content, style_imgs=styles, params=params)
     
@@ -308,6 +404,25 @@ class StyleTransferApp:
                 self.info_message.value = None
         except Exception as e :
             print(e)
+    
+    def check_for_warnings(self) :
+        warnings = ''
+        sum_one = self.sum_one_warning()
+        if sum_one is not None :
+            warnings += f'- {self.sum_one_warning()}\n'
+
+        self.warning.value = warnings
+        if warnings == '' :
+            self.warning_block.visible = False
+        else :
+            self.warning_block.visible = True
+
+    def sum_one_warning(self) :
+        valid_weights = [s.weight.value for s in self.style_blocks if s.is_valid]
+        if len(valid_weights) <= 1 or sum(valid_weights) == 1 :
+            return None
+        else :
+            return 'The style weights do not sum to 1'
 
 
 def main():
