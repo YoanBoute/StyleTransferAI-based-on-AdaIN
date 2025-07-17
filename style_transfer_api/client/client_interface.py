@@ -19,22 +19,50 @@ from functools import partial
     - Control images dimensions to have always same height style blocks and content block
     - Add a loading animation during generation (transparent layer over existing image or spinner on button)
     - Handle Add style button width depending on number of visible blocks
-    - Adapt slider value display min width to fit to the max value
-    - Add a cancel button visible only when a generation is in progress
     - Add titles to the interface components
     - Center style images under the content image
     - Place the parameters in a pop-up window
     - Find a better way to print generation status (and eventually message) -> As a notification maybe ?
     - Make the "Fix value" more compact (with an explicit togglable logo)
+    - Color the background of the warning card and change its font
+- Add a cancel button visible only when a generation is in progress
+- Add all necessary warnings (including a check to see whether the server is connected)
 - Add a "Reset weights" button
-- Limit the precision of displayed values to 2 numbers
-- Add the possibility to view images in full screen, and a download button on non-interactive ones
+- Add a download button on non-interactive images
 - Handle invalid requests (missing style / content)
 - Keep the previously generated images for as long as the interface is open
 - Provide a French / English translation
 """
 
 API_URL = "ws://localhost:8000/generate"
+
+# Add custom CSS to make dialog fullscreen
+ui.add_head_html('''
+    <style>
+    .q-dialog__inner {
+        padding: 0 !important;
+    }
+    .fullscreen-dialog .q-card {
+        max-width: none !important;
+        max-height: none !important;
+        width: 100% !important;
+        height: 100% !important;
+        padding: 5vh 5vw !important;
+        background: none !important;
+        box-shadow: none !important;
+        backdrop-filter: blur(5px) !important;
+    }
+    .fullscreen-dialog > .q-dialog__backdrop {
+        background: rgba(0,0,0,0.8) !important;
+    }
+    .fullscreen-image img {
+        object-fit: contain !important;
+    }
+    .blur {
+        filter: blur(5px) !important;             
+    }
+    </style>
+    ''')
 
 class LabeledSlider :
     """Custom component with linked slider and displayed value, along with a label"""
@@ -44,7 +72,7 @@ class LabeledSlider :
             with ui.row().classes('w-full gap-5 flex items-center') :
                 self.slider = ui.slider(min=min_value, max=max_value, step=step, value=default_value).classes('flex-1')
                 self.slider._props['color'] = 'deep-orange'
-                self.value_display = ui.number(value=default_value, precision=2, step=step).bind_value(self.slider, 'value').style('width: 70px; min-width: 70px;').props('dense outlined')  
+                self.value_display = ui.number(value=default_value, precision=2, step=step, format="%i" if type(step) is int else f"%.{len(str(step))-2}f").bind_value(self.slider, 'value').style(f'width:{40+8*max(len(str(step)), len(str(max_value)))}px').props('dense outlined')  
                 if fix_option :
                     self.fix_btn = Checkbox('Fix value')
 
@@ -120,7 +148,10 @@ class ImageComponent :
         else :
             self.disp_img = ui.interactive_image(self.placeholder_img).classes('border-solid border-2 rounded border-orange-500 w-full p-1')
         self.file.on_upload(self.update_img)
-        self.disp_img.bind_source_from(self.file, "value")
+        # self.disp_img.bind_source_from(self.file, "value")
+
+        self.dialog = ui.dialog().classes('fullscreen-dialog')     
+        self.zoom_btn = ui.button("View fullscreen", on_click=self.open_fullscreen)
 
     def update_img(self, e) :
         image_bytes = e.content.read()
@@ -131,6 +162,21 @@ class ImageComponent :
         self.close_btn.visible = True
         e.sender.reset() # Clear cache to avoid problems with re-uploading the same file
         ui.run_javascript(f"emitEvent('image-{self.disp_img.id}-update')")
+    
+    def open_fullscreen(self) :
+        self.dialog.clear()
+        with self.dialog:
+            with ui.card().classes('bg-black p-0'):
+                # with ui.row().classes('w-full justify-between items-center p-4 bg-black bg-opacity-50'):
+                #     # ui.label(alt_text).classes('text-white text-lg')
+                #     ui.button('✕', on_click=self.dialog.close).classes(
+                #         'text-white bg-transparent hover:bg-white hover:bg-opacity-20 text-xl'
+                #     )
+
+                self.fs_img = ui.image(self.source).classes(
+                    'fullscreen-image cursor-pointer'
+                ).on('click', self.dialog.close)  # Click image to close
+        self.dialog.open()
 
     def open_file_box(self) :
         js_code = f"""var uploader = getHtmlElement("{self.file.id}").querySelector("input[type=file]").click();"""
@@ -419,7 +465,7 @@ class StyleTransferApp:
 
     def sum_one_warning(self) :
         valid_weights = [s.weight.value for s in self.style_blocks if s.is_valid]
-        if len(valid_weights) <= 1 or sum(valid_weights) == 1 :
+        if len(valid_weights) == 0 or sum(valid_weights) == 1 :
             return None
         else :
             return 'The style weights do not sum to 1'
@@ -428,7 +474,7 @@ class StyleTransferApp:
 def main():
     app = StyleTransferApp()
     ui.dark_mode(True)
-    ui.run(title="StyleTransferAI", host="0.0.0.0", port=8501)
+    ui.run(title="StyleTransferAI", host="0.0.0.0", port=8502, reload=False)
 
 if __name__ in {"__main__", "__mp_main__"} :
     main()
