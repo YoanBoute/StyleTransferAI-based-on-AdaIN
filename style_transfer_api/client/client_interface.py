@@ -142,16 +142,18 @@ class ImageComponent :
         self.file.visible = False
         if self.interactive :
             with ui.interactive_image(self.placeholder_img).classes('border-solid border-2 rounded border-orange-500 w-full p-1 cursor-pointer') as self.disp_img :
-                self.close_btn = ui.button(icon='close').on('click.stop', self.reset_image).classes('absolute top-2 right-2').props('flat fab color=white')
+                self.close_btn = ui.button(icon='close').on('click.stop', self.reset_image).classes('absolute top-2 right-2').props('round flat color=white')
             self.close_btn.visible = False
-            self.disp_img.on('click', self.open_file_box)
+            self.disp_img.on('click.stop', lambda : self.open_file_box() if not self.valid_img else None)
         else :
             self.disp_img = ui.interactive_image(self.placeholder_img).classes('border-solid border-2 rounded border-orange-500 w-full p-1')
+        self.disp_img.on('click.stop', lambda : self.open_fullscreen() if self.valid_img else None)
         self.file.on_upload(self.update_img)
-        # self.disp_img.bind_source_from(self.file, "value")
 
-        self.dialog = ui.dialog().classes('fullscreen-dialog')     
-        self.zoom_btn = ui.button("View fullscreen", on_click=self.open_fullscreen)
+        self.dialog = ui.dialog().classes('fullscreen-dialog')
+        with self.disp_img :
+            self.change_img_btn = ui.button(icon='photo_library').on('click.stop', self.open_file_box).classes('absolute top-2 right-10').props('round flat color=white')
+        self.change_img_btn.visible = False
 
     def update_img(self, e) :
         image_bytes = e.content.read()
@@ -160,23 +162,19 @@ class ImageComponent :
         base64_url = f"data:{mime_type};base64,{encoded_image}"
         self.source = base64_url
         self.close_btn.visible = True
+        self.change_img_btn.visible = True
         e.sender.reset() # Clear cache to avoid problems with re-uploading the same file
         ui.run_javascript(f"emitEvent('image-{self.disp_img.id}-update')")
     
     def open_fullscreen(self) :
         self.dialog.clear()
         with self.dialog:
-            with ui.card().classes('bg-black p-0'):
-                # with ui.row().classes('w-full justify-between items-center p-4 bg-black bg-opacity-50'):
-                #     # ui.label(alt_text).classes('text-white text-lg')
-                #     ui.button('✕', on_click=self.dialog.close).classes(
-                #         'text-white bg-transparent hover:bg-white hover:bg-opacity-20 text-xl'
-                #     )
-
+            with ui.card().classes('bg-black p-0 cursor-pointer').on('click.stop', self.dialog.close) :
+                self.fs_close_btn = ui.button(icon='close').classes('absolute top-2 right-2 z-50').props('round flat color=white')
                 self.fs_img = ui.image(self.source).classes(
-                    'fullscreen-image cursor-pointer'
-                ).on('click', self.dialog.close)  # Click image to close
-        self.dialog.open()
+                    'fullscreen-image'
+                )
+            self.dialog.open()
 
     def open_file_box(self) :
         js_code = f"""var uploader = getHtmlElement("{self.file.id}").querySelector("input[type=file]").click();"""
@@ -185,6 +183,7 @@ class ImageComponent :
     def reset_image(self) :
         self.disp_img.set_source(self.placeholder_img)
         self.close_btn.visible = False
+        self.change_img_btn.visible = False
         ui.run_javascript(f"emitEvent('image-{self.disp_img.id}-reset')")
     
     def classes(self, add : str = "", *, remove : str = "") :
@@ -199,6 +198,10 @@ class ImageComponent :
     def source(self, value) :
         self.disp_img.source = value
         # self.disp_img.force_reload()
+    
+    @property
+    def valid_img(self) :
+        return self.disp_img.source != self.placeholder_img
 
 
 class StyleBlock :
@@ -248,13 +251,13 @@ class StyleBlock :
 
     @property
     def is_valid(self) :
-        return self.visible and self.img.source != self.img.placeholder_img
+        return self.visible and self.img.valid_img
 
 
 class StyleBlocksRow :
     def __init__(self, max_styles = 5) :
         self.max_styles = max_styles
-        with ui.row(align_items='stretch').classes('w-full gap-0') as self.row :
+        with ui.row(align_items='stretch').classes('w-full justify-around gap-0') as self.row :
             self.current_width_class = 'w-1/2'
             self.style_blocks = [StyleBlock(visible=(i == 0)).classes(self.current_width_class) for i in range(self.max_styles)]
             self.add_btn = ui.button('➕ Add style', on_click=self.add_block)
@@ -474,7 +477,7 @@ class StyleTransferApp:
 def main():
     app = StyleTransferApp()
     ui.dark_mode(True)
-    ui.run(title="StyleTransferAI", host="0.0.0.0", port=8502, reload=False)
+    ui.run(title="StyleTransferAI", host="0.0.0.0", port=8502, reload=True)
 
 if __name__ in {"__main__", "__mp_main__"} :
     main()
