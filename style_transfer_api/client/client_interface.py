@@ -6,7 +6,7 @@ import asyncio
 import websockets
 from websockets.asyncio.client import connect
 from utils.file import File
-from utils.requests import Request, Response, GenerationStatus
+from utils.requests import Request, GenRequest, CancelRequest, Response, GenerationStatus
 import base64
 from functools import partial
 
@@ -25,7 +25,7 @@ from functools import partial
     - Find a better way to print generation status (and eventually message) -> As a notification maybe ?
     - Make the "Fix value" more compact (with an explicit togglable logo)
     - Color the background of the warning card and change its font
-- Add a cancel button visible only when a generation is in progress
+    - Adjust color of images buttons based on image brightness
 - Add all necessary warnings (including a check to see whether the server is connected)
 - Add a "Reset weights" button
 - Add a download button on non-interactive images
@@ -57,9 +57,6 @@ ui.add_head_html('''
     }
     .fullscreen-image img {
         object-fit: contain !important;
-    }
-    .blur {
-        filter: blur(5px) !important;             
     }
     </style>
     ''')
@@ -146,7 +143,7 @@ class ImageComponent :
             self.close_btn.visible = False
             self.disp_img.on('click.stop', lambda : self.open_file_box() if not self.valid_img else None)
         else :
-            self.disp_img = ui.interactive_image(self.placeholder_img).classes('border-solid border-2 rounded border-orange-500 w-full p-1')
+            self.disp_img = ui.interactive_image(self.placeholder_img).classes('border-solid border-2 rounded border-orange-500 w-full p-1 cursor-pointer')
         self.disp_img.on('click.stop', lambda : self.open_fullscreen() if self.valid_img else None)
         self.file.on_upload(self.update_img)
 
@@ -197,7 +194,7 @@ class ImageComponent :
     @source.setter
     def source(self, value) :
         self.disp_img.source = value
-        # self.disp_img.force_reload()
+        self.disp_img.force_reload()
     
     @property
     def valid_img(self) :
@@ -411,8 +408,12 @@ class StyleTransferApp:
             with ui.column().classes('w-2/5') :
                 with ui.card().classes('w-full') :
                     self.generated_img = ImageComponent(False)
-                    self.gen_btn = ui.button('Generate image', on_click=self.generate_img).classes('block m-auto')
-                    self.gen_btn._props['color'] = 'deep-orange'
+                    with ui.row().classes('w-full justify-around') :
+                        self.gen_btn = ui.button('Generate image', on_click=self.generate_img).classes('block m-auto')
+                        self.gen_btn._props['color'] = 'deep-orange'
+                        self.cancel_btn = ui.button('Cancel generation', on_click=self.cancel_gen).classes('block m-auto')
+                        self.cancel_btn._props['color'] = 'deep-orange'
+                        self.cancel_btn.visible = False
                 with ui.card().classes('w-full') as self.warning_block :
                     self.warning = ui.textarea("Warning").classes('w-full')
                     self.warning.props("readonly")
@@ -427,10 +428,17 @@ class StyleTransferApp:
         content = File.from_url(self.content.source).model_dump()
         styles = [File.from_url(s.img.source).model_dump() for s in self.style_blocks if s.is_valid]
         params = self.style_blocks.get_params_dict() | self.params_block.get_params_dict()
-        return Request(client_id=self.client_id, content_img=content, style_imgs=styles, params=params)
+        return GenRequest(client_id=self.client_id, content_img=content, style_imgs=styles, params=params)
     
     async def generate_img(self) :
         request = self.generate_request()
+        self.cancel_btn.visible = True
+        async with connect(self.api_endpoint, max_size=50*1024*1024) as websocket :
+            await asyncio.create_task(self.handle_request(websocket, request))
+
+    async def cancel_gen(self) :
+        request = CancelRequest(client_id=self.client_id)
+        self.cancel_btn.visible = False
         async with connect(self.api_endpoint, max_size=50*1024*1024) as websocket :
             await asyncio.create_task(self.handle_request(websocket, request))
 
@@ -441,6 +449,8 @@ class StyleTransferApp:
                 resp = await connection.recv()
                 resp_dict = json.loads(resp)
                 response = Response.from_dict(resp_dict)
+                if response.status in (GenerationStatus.success, GenerationStatus.error) :
+                    self.cancel_btn.visible = False
                 if response.status == GenerationStatus.success :
                     gen_file = response.generated_image
                     gen_img_path = gen_file.save_to(Path('D:/StyleTransferAI/StyleTransferAI_AdaIN/StyleTransferAI-based-on-AdaIN/style_transfer_api/tmp/resp'))
