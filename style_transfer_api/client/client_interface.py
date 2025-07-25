@@ -21,7 +21,6 @@ from datetime import datetime
     - Add a loading animation during generation (transparent layer over existing image or spinner on button)
     - Handle Add style button width depending on number of visible blocks
     - Add titles to the interface components
-    - Center style images under the content image
     - Place the parameters in a pop-up window
     - Find a better way to print generation status (and eventually message) -> As a notification maybe ?
     - Make the "Fix value" more compact (with an explicit togglable logo)
@@ -422,7 +421,10 @@ class StyleTransferApp:
                 self.params_block = ParamsBlock()     
             with ui.column().classes('w-2/5') :
                 with ui.card().classes('w-full') :
-                    self.generated_img = ImageComponent(False)
+                    self.generated_img = ImageComponent(user_interactive=False)
+                    with self.generated_img.disp_img.classes('relative') :
+                        self.loading = ui.spinner(type='bars', size='15%', color='deep-orange').classes('absolute inset-0 m-auto z-10')
+                        self.blur = ui.element('div').classes('absolute inset-0 backdrop-blur-sm') # Blurs current image while a generation is in progress
                     with ui.row().classes('w-full justify-around') :
                         self.gen_btn = ui.button('Generate image', on_click=self.generate_img).classes('block m-auto')
                         self.gen_btn._props['color'] = 'deep-orange'
@@ -438,7 +440,9 @@ class StyleTransferApp:
                     self.status_message.props('readonly')
                     self.info_message = ui.textarea("Message").classes('w-full')
                     self.info_message.props('readonly')
-    
+        self.loading.bind_visibility_from(self.cancel_btn)
+        self.blur.bind_visibility_from(self.cancel_btn)
+
     def generate_request(self) :
         content = File.from_url(self.content.source).model_dump()
         styles = [File.from_url(s.img.source).model_dump() for s in self.style_blocks if s.is_valid]
