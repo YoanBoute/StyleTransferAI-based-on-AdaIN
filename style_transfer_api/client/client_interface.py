@@ -9,6 +9,7 @@ from utils.file import File
 from utils.requests import Request, GenRequest, CancelRequest, Response, GenerationStatus
 import base64
 from functools import partial
+from datetime import datetime
 
 """ 
 ------------------------------------------------------
@@ -28,13 +29,13 @@ from functools import partial
     - Adjust color of images buttons based on image brightness
 - Add all necessary warnings (including a check to see whether the server is connected)
 - Add a "Reset weights" button
-- Add a download button on non-interactive images
 - Handle invalid requests (missing style / content)
 - Keep the previously generated images for as long as the interface is open
 - Provide a French / English translation
 """
 
 API_URL = "ws://localhost:8000/generate"
+TMP_FILES_PATH = Path('D:/StyleTransferAI/StyleTransferAI_AdaIN/StyleTransferAI-based-on-AdaIN/style_transfer_api/tmp/')
 
 # Add custom CSS to make dialog fullscreen
 ui.add_head_html('''
@@ -143,7 +144,9 @@ class ImageComponent :
             self.close_btn.visible = False
             self.disp_img.on('click.stop', lambda : self.open_file_box() if not self.valid_img else None)
         else :
-            self.disp_img = ui.interactive_image(self.placeholder_img).classes('border-solid border-2 rounded border-orange-500 w-full p-1 cursor-pointer')
+            with ui.interactive_image(self.placeholder_img).classes('border-solid border-2 rounded border-orange-500 w-full p-1') as self.disp_img :
+                self.dwnld_btn = ui.button(icon='download').on('click.stop', self.download).classes('absolute top-2 right-2').props('round flat color=white')
+            self.dwnld_btn.visible = False
         self.disp_img.on('click.stop', lambda : self.open_fullscreen() if self.valid_img else None)
         self.file.on_upload(self.update_img)
 
@@ -168,6 +171,8 @@ class ImageComponent :
         with self.dialog:
             with ui.card().classes('bg-black p-0 cursor-pointer').on('click.stop', self.dialog.close) :
                 self.fs_close_btn = ui.button(icon='close').classes('absolute top-2 right-2 z-50').props('round flat color=white')
+                if not self.interactive :
+                    self.fs_dwnld_btn = ui.button(icon='download').classes('absolute top-2 right-12 z-50').props('round flat color=white')
                 self.fs_img = ui.image(self.source).classes(
                     'fullscreen-image'
                 )
@@ -182,6 +187,9 @@ class ImageComponent :
         self.close_btn.visible = False
         self.change_img_btn.visible = False
         ui.run_javascript(f"emitEvent('image-{self.disp_img.id}-reset')")
+
+    def download(self) :
+        ui.download(self.source, filename=f"StyleTransfer_{datetime.today().strftime("%Y%m%d_%H-%M-%S")}")
     
     def classes(self, add : str = "", *, remove : str = "") :
         self.disp_img.classes(add=add, remove=remove)
@@ -194,6 +202,13 @@ class ImageComponent :
     @source.setter
     def source(self, value) :
         self.disp_img.source = value
+        if not self.interactive :
+            if value != self.placeholder_img :
+                self.classes('cursor-pointer')
+                self.dwnld_btn.visible = True
+            else :
+                self.classes(remove='cursor-pointer')
+                self.dwnld_btn.visible = False
         self.disp_img.force_reload()
     
     @property
@@ -453,7 +468,7 @@ class StyleTransferApp:
                     self.cancel_btn.visible = False
                 if response.status == GenerationStatus.success :
                     gen_file = response.generated_image
-                    gen_img_path = gen_file.save_to(Path('D:/StyleTransferAI/StyleTransferAI_AdaIN/StyleTransferAI-based-on-AdaIN/style_transfer_api/tmp/resp'))
+                    gen_img_path = gen_file.save_to(TMP_FILES_PATH / datetime.today().strftime('%Y%m%d_%H-%M-%S'))
                     self.generated_img.source = gen_img_path
                 self.status_message.value = response.status
                 self.info_message.value = response.message
