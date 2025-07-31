@@ -17,13 +17,10 @@ from datetime import datetime
 ------------------------------------------------------
 
 - Layout changes
-    - Control images dimensions to have always same height style blocks and content block
-    - Add a loading animation during generation (transparent layer over existing image or spinner on button)
     - Handle Add style button width depending on number of visible blocks
     - Add titles to the interface components
     - Place the parameters in a pop-up window
     - Find a better way to print generation status (and eventually message) -> As a notification maybe ?
-    - Make the "Fix value" more compact (with an explicit togglable logo)
     - Color the background of the warning card and change its font
     - Adjust color of images buttons based on image brightness
 - Add all necessary warnings (including a check to see whether the server is connected)
@@ -55,7 +52,7 @@ ui.add_head_html('''
     .fullscreen-dialog > .q-dialog__backdrop {
         background: rgba(0,0,0,0.8) !important;
     }
-    .fullscreen-image img {
+    .img-contain img {
         object-fit: contain !important;
     }
     </style>
@@ -71,7 +68,7 @@ class LabeledSlider :
                 self.slider._props['color'] = 'deep-orange'
                 self.value_display = ui.number(value=default_value, precision=2, step=step, format="%i" if type(step) is int else f"%.{len(str(step))-2}f").bind_value(self.slider, 'value').style(f'width:{40+8*max(len(str(step)), len(str(max_value)))}px').props('dense outlined')  
                 if fix_option :
-                    self.fix_btn = Checkbox('Fix value')
+                    self.fix_btn = TogglableButton(icon1='lock_open', icon2='lock')
 
     @property
     def value(self) :
@@ -130,6 +127,27 @@ class Checkbox :
         self.box.on_value_change(handler)
 
 
+class TogglableButton :
+    def __init__(self, icon1, icon2):
+        self.btn = ui.button(icon=icon1, on_click=self.toggle).props('round color=deep-orange')
+        self._value = False
+        self._icon1 = icon1
+        self._icon2 = icon2
+    
+    def toggle(self) :
+        self.value = not self.value
+    
+    @property
+    def value(self) :
+        return self._value
+    
+    @value.setter
+    def value(self, new_value) :
+        self._value = new_value
+        self.btn.icon = self._icon2 if self.value else self._icon1
+        self.btn.props(f'color={"deep-orange-10" if self.value else "deep-orange"}')
+
+
 class ImageComponent :
     """Custom image component to store and display an image file chosen by the user (if interactive)"""
     def __init__(self, user_interactive = True) :
@@ -138,12 +156,12 @@ class ImageComponent :
         self.file = ui.upload(auto_upload=True).props('accept=image/*')
         self.file.visible = False
         if self.interactive :
-            with ui.interactive_image(self.placeholder_img).classes('border-solid border-2 rounded border-orange-500 w-full p-1 cursor-pointer') as self.disp_img :
+            with ui.interactive_image(self.placeholder_img).classes('border-solid border-2 rounded border-orange-500 w-full p-1 cursor-pointer img-contain') as self.disp_img :
                 self.close_btn = ui.button(icon='close').on('click.stop', self.reset_image).classes('absolute top-2 right-2').props('round flat color=white')
             self.close_btn.visible = False
             self.disp_img.on('click.stop', lambda : self.open_file_box() if not self.valid_img else None)
         else :
-            with ui.interactive_image(self.placeholder_img).classes('border-solid border-2 rounded border-orange-500 w-full p-1') as self.disp_img :
+            with ui.interactive_image(self.placeholder_img).classes('border-solid border-2 rounded border-orange-500 w-full p-1 img-contain') as self.disp_img :
                 self.dwnld_btn = ui.button(icon='download').on('click.stop', self.download).classes('absolute top-2 right-2').props('round flat color=white')
             self.dwnld_btn.visible = False
         self.disp_img.on('click.stop', lambda : self.open_fullscreen() if self.valid_img else None)
@@ -172,9 +190,7 @@ class ImageComponent :
                 self.fs_close_btn = ui.button(icon='close').classes('absolute top-2 right-2 z-50').props('round flat color=white')
                 if not self.interactive :
                     self.fs_dwnld_btn = ui.button(icon='download').classes('absolute top-2 right-12 z-50').props('round flat color=white')
-                self.fs_img = ui.image(self.source).classes(
-                    'fullscreen-image'
-                )
+                self.fs_img = ui.image(self.source).classes('img-contain')
             self.dialog.open()
 
     def open_file_box(self) :
@@ -218,7 +234,7 @@ class ImageComponent :
 class StyleBlock :
     def __init__(self, visible) :
         with ui.card() as self.block :
-            self.img = ImageComponent(user_interactive=True)
+            self.img = ImageComponent(user_interactive=True).classes("h-[25vh]")
             self.weight = LabeledSlider('Weight', 0, 1, 0.01, 1, fix_option=True)
             self.weight.visible = False # Weight slider should only appear if multiple styles are displayed
             self.weight.enabled = False
@@ -234,6 +250,7 @@ class StyleBlock :
     def reset(self) :
         self.img.reset_image()
         self.weight.value = 1
+        self.weight.fix_btn.value = False
         self.scale.value = 1
     
     def activate_sliders(self) :
@@ -416,13 +433,13 @@ class StyleTransferApp:
 
         with ui.row().classes('w-full justify-between') :
             with ui.card().classes('w-7/12') :  
-                self.content = ImageComponent()  
+                self.content = ImageComponent().classes('h-[50vh]')  
                 self.style_blocks = StyleBlocksRow()
                 self.params_block = ParamsBlock()     
             with ui.column().classes('w-2/5') :
                 with ui.card().classes('w-full') :
-                    self.generated_img = ImageComponent(user_interactive=False)
-                    with self.generated_img.disp_img.classes('relative') :
+                    self.generated_img = ImageComponent(user_interactive=False).classes('h-[50vh]')
+                    with self.generated_img.disp_img :
                         self.loading = ui.spinner(type='bars', size='15%', color='deep-orange').classes('absolute inset-0 m-auto z-10')
                         self.blur = ui.element('div').classes('absolute inset-0 backdrop-blur-sm') # Blurs current image while a generation is in progress
                     with ui.row().classes('w-full justify-around') :
