@@ -17,23 +17,21 @@ from datetime import datetime
 ------------------------------------------------------
 
 - Layout changes
-    - Handle Add style button width depending on number of visible blocks
     - Add titles to the interface components
     - Place the parameters in a pop-up window
     - Find a better way to print generation status (and eventually message) -> As a notification maybe ?
     - Color the background of the warning card and change its font
-    - Adjust color of images buttons based on image brightness
+- Bug : When removing the first style block while it has an image and the second has no image, the new first will keep the "change image" button and images won't display anymore
+- Bug : Sometimes, an image won't be uploaded, which breaks the image component (randomly)
 - Add all necessary warnings (including a check to see whether the server is connected)
 - Add a "Reset weights" button
 - Handle invalid requests (missing style / content)
-- Keep the previously generated images for as long as the interface is open
 - Provide a French / English translation
 """
 
 API_URL = "ws://localhost:8000/generate"
 TMP_FILES_PATH = Path('D:/StyleTransferAI/StyleTransferAI_AdaIN/StyleTransferAI-based-on-AdaIN/style_transfer_api/tmp/')
 
-# Add custom CSS to make dialog fullscreen
 ui.add_head_html('''
     <style>
     .q-dialog__inner {
@@ -150,27 +148,29 @@ class TogglableButton :
 
 class ImageComponent :
     """Custom image component to store and display an image file chosen by the user (if interactive)"""
-    def __init__(self, user_interactive = True) :
+    def __init__(self, user_interactive = True, source = None) :
         self.interactive = user_interactive
         self.placeholder_img = 'https://placehold.co/600x400?text=Upload+Image' if self.interactive else 'https://placehold.co/600x400?text=Generated+Image'
         self.file = ui.upload(auto_upload=True).props('accept=image/*')
         self.file.visible = False
         if self.interactive :
-            with ui.interactive_image(self.placeholder_img).classes('border-solid border-2 rounded border-orange-500 w-full p-1 cursor-pointer img-contain') as self.disp_img :
-                self.close_btn = ui.button(icon='close').on('click.stop', self.reset_image).classes('absolute top-2 right-2').props('round flat color=white')
+            with ui.interactive_image(self.placeholder_img).classes('border-solid border-2 rounded border-orange-500 p-1 cursor-pointer img-contain') as self.disp_img :
+                self.close_btn = ui.button(icon='close').on('click.stop', self.reset_image).classes('absolute top-2 right-2').props('round flat color=grey-5')
             self.close_btn.visible = False
             self.disp_img.on('click.stop', lambda : self.open_file_box() if not self.valid_img else None)
         else :
-            with ui.interactive_image(self.placeholder_img).classes('border-solid border-2 rounded border-orange-500 w-full p-1 img-contain') as self.disp_img :
-                self.dwnld_btn = ui.button(icon='download').on('click.stop', self.download).classes('absolute top-2 right-2').props('round flat color=white')
+            with ui.interactive_image(self.placeholder_img).classes('border-solid border-2 rounded border-orange-500 p-1 img-contain') as self.disp_img :
+                self.dwnld_btn = ui.button(icon='download').on('click.stop', self.download).classes('absolute top-2 right-2').props('round flat color=grey-5')
             self.dwnld_btn.visible = False
         self.disp_img.on('click.stop', lambda : self.open_fullscreen() if self.valid_img else None)
         self.file.on_upload(self.update_img)
 
         self.dialog = ui.dialog().classes('fullscreen-dialog')
         with self.disp_img :
-            self.change_img_btn = ui.button(icon='photo_library').on('click.stop', self.open_file_box).classes('absolute top-2 right-10').props('round flat color=white')
+            self.change_img_btn = ui.button(icon='photo_library').on('click.stop', self.open_file_box).classes('absolute top-2 right-10').props('round flat color=grey-5')
         self.change_img_btn.visible = False
+        if source is not None :
+            self.source = source
 
     def update_img(self, e) :
         image_bytes = e.content.read()
@@ -187,9 +187,9 @@ class ImageComponent :
         self.dialog.clear()
         with self.dialog:
             with ui.card().classes('bg-black p-0 cursor-pointer').on('click.stop', self.dialog.close) :
-                self.fs_close_btn = ui.button(icon='close').classes('absolute top-2 right-2 z-50').props('round flat color=white')
+                self.fs_close_btn = ui.button(icon='close').classes('absolute top-2 right-2 z-50').props('round flat color=grey-5')
                 if not self.interactive :
-                    self.fs_dwnld_btn = ui.button(icon='download').classes('absolute top-2 right-12 z-50').props('round flat color=white')
+                    self.fs_dwnld_btn = ui.button(icon='download').on('click.stop', self.download).classes('absolute top-2 right-12 z-50').props('round flat color=grey-5')
                 self.fs_img = ui.image(self.source).classes('img-contain')
             self.dialog.open()
 
@@ -229,12 +229,54 @@ class ImageComponent :
     @property
     def valid_img(self) :
         return self.disp_img.source != self.placeholder_img
+    
+
+class ImageCarousel :
+    def __init__(self, num_img_per_page = 3) :
+        # with ui.carousel(animated=True, arrows=True) as self.carousel :
+        #     # for i in range(0, 9, 3) :
+        #         with ui.carousel_slide() :
+        #             with ui.row(wrap=False) :
+        #                 ui.image(f'https://picsum.photos/id/4/270/180').classes('w-96')
+        #                 ui.image(f'https://picsum.photos/id/44/270/180').classes('w-96')
+        #                 ui.image(f'https://picsum.photos/id/444/270/180').classes('w-96')
+        self.carousel = ui.carousel(animated=True, arrows=True)
+        self.sources = []
+        self.num_img_per_page = num_img_per_page
+        self.carousel.bind_visibility_from(self, 'has_images')
+
+    @property
+    def has_images(self) :
+        return len(self.sources) > 0
+    
+    @property
+    def visible(self) :
+        return self.carousel.visible
+    
+    def classes(self, add : str = "", *, remove : str = "") :
+        self.carousel.classes(add=add, remove=remove)
+        return self
+
+    def add_image(self, source) :
+        self.sources.insert(0, source)
+        self.update()
+    
+    def update(self) :
+        self.carousel.clear()
+        num_images = len(self.sources)
+        num_pages = num_images // self.num_img_per_page if num_images % self.num_img_per_page == 0 else (num_images // self.num_img_per_page) + 1
+        with self.carousel :
+            for i in range(num_pages) :
+                with ui.carousel_slide() :
+                    with ui.row().classes('w-full h-full gap-1 justify-center overflow-hidden') :
+                        for j in range(i*self.num_img_per_page, min(num_images, (i+1) * self.num_img_per_page)) :
+                            ImageComponent(user_interactive=False, source=self.sources[j]).classes(f'w-[{(100/self.num_img_per_page) - 1}%] h-full')
 
 
 class StyleBlock :
     def __init__(self, visible) :
         with ui.card() as self.block :
-            self.img = ImageComponent(user_interactive=True).classes("h-[25vh]")
+            self.img = ImageComponent(user_interactive=True).classes("h-[25vh] w-full")
             self.weight = LabeledSlider('Weight', 0, 1, 0.01, 1, fix_option=True)
             self.weight.visible = False # Weight slider should only appear if multiple styles are displayed
             self.weight.enabled = False
@@ -285,10 +327,10 @@ class StyleBlock :
 class StyleBlocksRow :
     def __init__(self, max_styles = 5) :
         self.max_styles = max_styles
-        with ui.row(align_items='stretch').classes('w-full justify-around gap-0') as self.row :
+        with ui.row(align_items='center').classes('w-full justify-around gap-0') as self.row :
             self.current_width_class = 'w-1/2'
             self.style_blocks = [StyleBlock(visible=(i == 0)).classes(self.current_width_class) for i in range(self.max_styles)]
-            self.add_btn = ui.button('➕ Add style', on_click=self.add_block)
+            self.add_btn = ui.button('Add style', icon='add_circle', on_click=self.add_block)
             self.add_btn._props['color'] = 'deep-orange'
         self.num_visible = 1
         for i in range(self.max_styles) :
@@ -423,7 +465,11 @@ class ParamsBlock :
         self.patch_overlap.enabled = not self.patch_overlap.enabled
     
     def get_params_dict(self) :
-        return {key : component.value for key, component in self.__dict__.items() if key != "block"}
+        params_dict = {key : component.value for key, component in self.__dict__.items() if key != "block"}
+        params_dict['resize_size'] = int(params_dict['resize_size'])
+        params_dict['patch_size'] = int(params_dict['patch_size'])
+        params_dict['patch_context_size'] = int(params_dict['patch_context_size'])
+        return params_dict
                         
 
 class StyleTransferApp:
@@ -432,13 +478,13 @@ class StyleTransferApp:
         self.api_endpoint = api_endpoint
 
         with ui.row().classes('w-full justify-between') :
-            with ui.card().classes('w-7/12') :  
-                self.content = ImageComponent().classes('h-[50vh]')  
+            with ui.card().classes('w-[49%]') :  #w-7/12
+                self.content = ImageComponent().classes('h-[50vh] w-full')  
                 self.style_blocks = StyleBlocksRow()
                 self.params_block = ParamsBlock()     
-            with ui.column().classes('w-2/5') :
+            with ui.column().classes('w-[49%]') : #w-2/5
                 with ui.card().classes('w-full') :
-                    self.generated_img = ImageComponent(user_interactive=False).classes('h-[50vh]')
+                    self.generated_img = ImageComponent(user_interactive=False).classes('h-[50vh] w-full')
                     with self.generated_img.disp_img :
                         self.loading = ui.spinner(type='bars', size='15%', color='deep-orange').classes('absolute inset-0 m-auto z-10')
                         self.blur = ui.element('div').classes('absolute inset-0 backdrop-blur-sm') # Blurs current image while a generation is in progress
@@ -448,6 +494,8 @@ class StyleTransferApp:
                         self.cancel_btn = ui.button('Cancel generation', on_click=self.cancel_gen).classes('block m-auto')
                         self.cancel_btn._props['color'] = 'deep-orange'
                         self.cancel_btn.visible = False
+                with ui.card().classes('w-full h-[25vh]') as self.carousel_card :
+                    self.carousel_block = ImageCarousel().classes('h-[99%] w-[99%] m-auto')
                 with ui.card().classes('w-full') as self.warning_block :
                     self.warning = ui.textarea("Warning").classes('w-full')
                     self.warning.props("readonly")
@@ -459,6 +507,7 @@ class StyleTransferApp:
                     self.info_message.props('readonly')
         self.loading.bind_visibility_from(self.cancel_btn)
         self.blur.bind_visibility_from(self.cancel_btn)
+        self.carousel_card.bind_visibility_from(self.carousel_block)
 
     def generate_request(self) :
         content = File.from_url(self.content.source).model_dump()
@@ -491,6 +540,7 @@ class StyleTransferApp:
                     gen_file = response.generated_image
                     gen_img_path = gen_file.save_to(TMP_FILES_PATH / datetime.today().strftime('%Y%m%d_%H-%M-%S'))
                     self.generated_img.source = gen_img_path
+                    self.carousel_block.add_image(gen_img_path)
                 self.status_message.value = response.status
                 self.info_message.value = response.message
             except websockets.ConnectionClosed:
