@@ -17,16 +17,18 @@ from datetime import datetime
 ------------------------------------------------------
 
 - Layout changes
-    - Add titles to the interface components
-    - Place the parameters in a pop-up window
     - Find a better way to print generation status (and eventually message) -> As a notification maybe ?
     - Color the background of the warning card and change its font
+    - Change placeholders for images
+- Connect to the server on interface launch, and delete all client-related files on the server when this connection is closed
 - Bug : When removing the first style block while it has an image and the second has no image, the new first will keep the "change image" button and images won't display anymore
 - Bug : Sometimes, an image won't be uploaded, which breaks the image component (randomly)
 - Add all necessary warnings (including a check to see whether the server is connected)
 - Add a "Reset weights" button
 - Handle invalid requests (missing style / content)
 - Provide a French / English translation
+- Add tooltips with information logo next to each parameter
+- Add a global description message dialog that indicates how to use the interface
 """
 
 API_URL = "ws://localhost:8000/generate"
@@ -240,10 +242,12 @@ class ImageCarousel :
         #                 ui.image(f'https://picsum.photos/id/4/270/180').classes('w-96')
         #                 ui.image(f'https://picsum.photos/id/44/270/180').classes('w-96')
         #                 ui.image(f'https://picsum.photos/id/444/270/180').classes('w-96')
-        self.carousel = ui.carousel(animated=True, arrows=True)
+        with ui.card() as self.block :
+            ui.label('Generation history').classes('font-medium text-slate-200 h-[5%] m-0 p-0')
+            self.carousel = ui.carousel(animated=True, arrows=True).classes('h-[94%] w-[99%] m-auto')
         self.sources = []
         self.num_img_per_page = num_img_per_page
-        self.carousel.bind_visibility_from(self, 'has_images')
+        self.block.bind_visibility_from(self, 'has_images')
 
     @property
     def has_images(self) :
@@ -251,10 +255,10 @@ class ImageCarousel :
     
     @property
     def visible(self) :
-        return self.carousel.visible
+        return self.block.visible
     
     def classes(self, add : str = "", *, remove : str = "") :
-        self.carousel.classes(add=add, remove=remove)
+        self.block.classes(add=add, remove=remove)
         return self
 
     def add_image(self, source) :
@@ -327,6 +331,7 @@ class StyleBlock :
 class StyleBlocksRow :
     def __init__(self, max_styles = 5) :
         self.max_styles = max_styles
+        ui.label('Style images').classes('font-medium text-slate-200')
         with ui.row(align_items='center').classes('w-full justify-around gap-0') as self.row :
             self.current_width_class = 'w-1/2'
             self.style_blocks = [StyleBlock(visible=(i == 0)).classes(self.current_width_class) for i in range(self.max_styles)]
@@ -438,23 +443,23 @@ class StyleBlocksRow :
         }
     
 
-class ParamsBlock :
+class ParamsMenu :
     def __init__(self):
-        with ui.column().classes('w-full') as self.block :
-            with ui.column().classes('w-4/5 block m-auto') :
+        with ui.right_drawer(value=False, elevated=True, bordered=True).props('overlay').classes('z-50') as self.menu :
+            ui.label('Generation parameters').classes('text-xl font-semibold mb-[5vh] mt-2')
+            self.close_btn = ui.button(icon='close', on_click=self.toggle).props('round flat color=grey-5').classes('absolute top-4 right-4 z-50')
+            with ui.column().classes('w-full gap-5') :
                 self.alpha = LabeledSlider('Importance of stylization', 0, 1, 0.05, 1)
-            with ui.row().classes('w-full flex justify-around') :
-                with ui.column(align_items='stretch').classes('w-2/5') :
-                    self.preserve_colors = Checkbox('Preserve colors')
-                    with ui.card().classes('w-full') :
-                        self.resize_size = LabeledSlider('Resize size', 256, 2000, 1, 1000)
-                        self.keep_aspect_ratio = Checkbox('Keep aspect ratio')
-                with ui.card().classes('w-2/5') :
+                self.preserve_colors = Checkbox('Preserve colors')
+                with ui.card().classes('w-full') :
+                    self.resize_size = LabeledSlider('Resize size', 256, 2000, 1, 1000)
+                    self.keep_aspect_ratio = Checkbox('Keep aspect ratio')
+                with ui.card().classes('w-full') :
                     self.patches = Checkbox("Work with patches", value=False, on_change=self.toggle_patches_params)
                     self.patch_size = LabeledSlider("Patch size", 256, 1000, 1, 256)
                     self.patch_context_size = LabeledSlider("Patch context size", 256, 1500, 1, 300)
                     self.patch_overlap = LabeledSlider("Patch overlap", 0, 0.9, 0.05, 0.5)
-        
+        self.blur_overlay = ui.element('div').classes('fixed inset-0 backdrop-blur-sm z-40 bg-black/30 hidden').on('click.stop', self.toggle)
         self.patch_size.enabled = False
         self.patch_context_size.enabled = False
         self.patch_overlap.enabled = False
@@ -464,8 +469,15 @@ class ParamsBlock :
         self.patch_context_size.enabled = not self.patch_context_size.enabled 
         self.patch_overlap.enabled = not self.patch_overlap.enabled
     
+    def toggle(self) :
+        self.menu.toggle()
+        if self.menu.value :
+            self.blur_overlay.classes(remove='hidden')
+        else :
+            self.blur_overlay.classes(add='hidden')
+
     def get_params_dict(self) :
-        params_dict = {key : component.value for key, component in self.__dict__.items() if key != "block"}
+        params_dict = {key : component.value for key, component in self.__dict__.items() if key not in ["menu", "close_btn", "blur_overlay"]}
         params_dict['resize_size'] = int(params_dict['resize_size'])
         params_dict['patch_size'] = int(params_dict['patch_size'])
         params_dict['patch_context_size'] = int(params_dict['patch_context_size'])
@@ -476,14 +488,18 @@ class StyleTransferApp:
     def __init__(self, api_endpoint = API_URL) :
         self.client_id = uuid.uuid4().hex
         self.api_endpoint = api_endpoint
-
+        self.menu = ParamsMenu()
+        self.menu_btn = ui.button(icon='menu', on_click=self.menu.toggle).props('round color=deep-orange').classes('fixed top-4 right-4 z-50 bg-black/50 hover:bg-black/70 text-white')
+        with ui.element('div').classes('w-full h-[10vh] justify-center align-center') :
+            ui.label('Style Transfer AI').classes('text-[6vh] w-[30vw] m-auto text-center font-bold font-["Arial Black", Gadget, sans-serif]')
         with ui.row().classes('w-full justify-between') :
-            with ui.card().classes('w-[49%]') :  #w-7/12
+            with ui.card().classes('w-[49%]') : 
+                ui.label('Content image').classes('font-medium text-slate-200')
                 self.content = ImageComponent().classes('h-[50vh] w-full')  
                 self.style_blocks = StyleBlocksRow()
-                self.params_block = ParamsBlock()     
-            with ui.column().classes('w-[49%]') : #w-2/5
+            with ui.column().classes('w-[49%]') : 
                 with ui.card().classes('w-full') :
+                    ui.label('Generated image').classes('font-medium text-slate-200')
                     self.generated_img = ImageComponent(user_interactive=False).classes('h-[50vh] w-full')
                     with self.generated_img.disp_img :
                         self.loading = ui.spinner(type='bars', size='15%', color='deep-orange').classes('absolute inset-0 m-auto z-10')
@@ -494,8 +510,7 @@ class StyleTransferApp:
                         self.cancel_btn = ui.button('Cancel generation', on_click=self.cancel_gen).classes('block m-auto')
                         self.cancel_btn._props['color'] = 'deep-orange'
                         self.cancel_btn.visible = False
-                with ui.card().classes('w-full h-[25vh]') as self.carousel_card :
-                    self.carousel_block = ImageCarousel().classes('h-[99%] w-[99%] m-auto')
+                self.carousel_block = ImageCarousel().classes('w-full h-[30vh]')
                 with ui.card().classes('w-full') as self.warning_block :
                     self.warning = ui.textarea("Warning").classes('w-full')
                     self.warning.props("readonly")
@@ -507,12 +522,11 @@ class StyleTransferApp:
                     self.info_message.props('readonly')
         self.loading.bind_visibility_from(self.cancel_btn)
         self.blur.bind_visibility_from(self.cancel_btn)
-        self.carousel_card.bind_visibility_from(self.carousel_block)
 
     def generate_request(self) :
         content = File.from_url(self.content.source).model_dump()
         styles = [File.from_url(s.img.source).model_dump() for s in self.style_blocks if s.is_valid]
-        params = self.style_blocks.get_params_dict() | self.params_block.get_params_dict()
+        params = self.style_blocks.get_params_dict() | self.menu.get_params_dict()
         return GenRequest(client_id=self.client_id, content_img=content, style_imgs=styles, params=params)
     
     async def generate_img(self) :
