@@ -1,5 +1,6 @@
-from nicegui import ui
+from nicegui import ui, app
 from pathlib import Path
+import shutil
 import uuid
 import json
 import asyncio
@@ -10,6 +11,7 @@ from utils.requests import Request, GenRequest, CancelRequest, Response, Generat
 import base64
 from functools import partial
 from datetime import datetime
+import time
 
 """ 
 ------------------------------------------------------
@@ -17,22 +19,22 @@ from datetime import datetime
 ------------------------------------------------------
 
 - Layout changes
-    - Find a better way to print generation status (and eventually message) -> As a notification maybe ?
-    - Color the background of the warning card and change its font
+    - Color the background of the warning card and change its font / make it a tooltip next to the generation button
     - Change placeholders for images
-- Connect to the server on interface launch, and delete all client-related files on the server when this connection is closed
-- Bug : When removing the first style block while it has an image and the second has no image, the new first will keep the "change image" button and images won't display anymore
-- Bug : Sometimes, an image won't be uploaded, which breaks the image component (randomly)
+- Link the connected state of the WS manager to a visual indicator on the interface
+- Save the generated images on server side (only send the url to the client), and delete them once the connection is closed
 - Add all necessary warnings (including a check to see whether the server is connected)
 - Add a "Reset weights" button
 - Handle invalid requests (missing style / content)
 - Provide a French / English translation
 - Add tooltips with information logo next to each parameter
 - Add a global description message dialog that indicates how to use the interface
+- Delete useless code files
 """
 
 API_URL = "ws://localhost:8000/generate"
 TMP_FILES_PATH = Path('D:/StyleTransferAI/StyleTransferAI_AdaIN/StyleTransferAI-based-on-AdaIN/style_transfer_api/tmp/')
+MAX_SIZE = 20 # Max size of images in Mb 
 
 ui.add_head_html('''
     <style>
@@ -57,6 +59,8 @@ ui.add_head_html('''
     }
     </style>
     ''')
+
+app.add_static_files('/static', '.')
 
 class LabeledSlider :
     """Custom component with linked slider and displayed value, along with a label"""
@@ -153,24 +157,23 @@ class ImageComponent :
     def __init__(self, user_interactive = True, source = None) :
         self.interactive = user_interactive
         self.placeholder_img = 'https://placehold.co/600x400?text=Upload+Image' if self.interactive else 'https://placehold.co/600x400?text=Generated+Image'
-        self.file = ui.upload(auto_upload=True).props('accept=image/*')
-        self.file.visible = False
         if self.interactive :
+            self.file = ui.upload(auto_upload=True).props('accept=image/*')
+            self.file.visible = False
+            self.file.on_upload(self.update_img)
             with ui.interactive_image(self.placeholder_img).classes('border-solid border-2 rounded border-orange-500 p-1 cursor-pointer img-contain') as self.disp_img :
                 self.close_btn = ui.button(icon='close').on('click.stop', self.reset_image).classes('absolute top-2 right-2').props('round flat color=grey-5')
-            self.close_btn.visible = False
+                self.change_img_btn = ui.button(icon='photo_library').on('click.stop', self.open_file_box).classes('absolute top-2 right-10').props('round flat color=grey-5')
+            self.close_btn.bind_visibility_from(self, 'valid_img')
+            self.change_img_btn.bind_visibility_from(self, 'valid_img')
             self.disp_img.on('click.stop', lambda : self.open_file_box() if not self.valid_img else None)
         else :
             with ui.interactive_image(self.placeholder_img).classes('border-solid border-2 rounded border-orange-500 p-1 img-contain') as self.disp_img :
                 self.dwnld_btn = ui.button(icon='download').on('click.stop', self.download).classes('absolute top-2 right-2').props('round flat color=grey-5')
-            self.dwnld_btn.visible = False
+                self.dwnld_btn.bind_visibility_from(self, 'valid_img')
         self.disp_img.on('click.stop', lambda : self.open_fullscreen() if self.valid_img else None)
-        self.file.on_upload(self.update_img)
 
         self.dialog = ui.dialog().classes('fullscreen-dialog')
-        with self.disp_img :
-            self.change_img_btn = ui.button(icon='photo_library').on('click.stop', self.open_file_box).classes('absolute top-2 right-10').props('round flat color=grey-5')
-        self.change_img_btn.visible = False
         if source is not None :
             self.source = source
 
@@ -178,10 +181,8 @@ class ImageComponent :
         image_bytes = e.content.read()
         encoded_image = base64.b64encode(image_bytes).decode('utf-8')
         mime_type = e.type if e.type else 'image/jpeg'
-        base64_url = f"data:{mime_type};base64,{encoded_image}"
+        base64_url = f"data:{mime_type};base64,{encoded_image}#t={time.time()}"
         self.source = base64_url
-        self.close_btn.visible = True
-        self.change_img_btn.visible = True
         e.sender.reset() # Clear cache to avoid problems with re-uploading the same file
         ui.run_javascript(f"emitEvent('image-{self.disp_img.id}-update')")
     
@@ -201,8 +202,6 @@ class ImageComponent :
     
     def reset_image(self) :
         self.disp_img.set_source(self.placeholder_img)
-        self.close_btn.visible = False
-        self.change_img_btn.visible = False
         ui.run_javascript(f"emitEvent('image-{self.disp_img.id}-reset')")
 
     def download(self) :
@@ -222,11 +221,9 @@ class ImageComponent :
         if not self.interactive :
             if value != self.placeholder_img :
                 self.classes('cursor-pointer')
-                self.dwnld_btn.visible = True
             else :
                 self.classes(remove='cursor-pointer')
-                self.dwnld_btn.visible = False
-        self.disp_img.force_reload()
+        # self.disp_img.force_reload()
     
     @property
     def valid_img(self) :
@@ -329,7 +326,7 @@ class StyleBlock :
 
 
 class StyleBlocksRow :
-    def __init__(self, max_styles = 5) :
+    def __init__(self, max_styles = 4) :
         self.max_styles = max_styles
         ui.label('Style images').classes('font-medium text-slate-200')
         with ui.row(align_items='center').classes('w-full justify-around gap-0') as self.row :
@@ -484,14 +481,118 @@ class ParamsMenu :
         return params_dict
                         
 
-class StyleTransferApp:
+class WebsocketManager :
+    def __init__(self, api_endpoint, container):
+        self.api_endpoint = api_endpoint
+        self.container = container
+        self.websocket = None
+        self._connecting = False
+        self.connected = False
+        self.rcv_task = None
+        self.ping_task = None
+
+    async def connect(self) :
+        if self._connecting :
+            return
+        self._connecting = True
+        try :
+            self.websocket = await connect(self.api_endpoint, max_size=MAX_SIZE*1024*1024)
+            self.connected = True
+            if self.rcv_task and not self.rcv_task.done() :
+                self.rcv_task.cancel()
+                try :
+                    await self.rcv_task
+                except asyncio.CancelledError :
+                    pass
+            self.rcv_task = asyncio.create_task(self.receive_loop())
+            if self.ping_task and not self.ping_task.done() :
+                self.ping_task.cancel()
+                try :
+                    await self.ping_task
+                except asyncio.CancelledError :
+                    pass
+            self.ping_task = asyncio.create_task(self.check_connection())
+        except Exception as e :
+            ui.notify(f"Unable to connect to the model ({e})")
+            print(e)
+        finally :
+            self._connecting = False
+    
+    async def disconnect(self) :
+        if self.websocket :
+            if self.rcv_task : 
+                self.rcv_task.cancel()
+                try :
+                    await self.rcv_task
+                except asyncio.CancelledError :
+                    pass
+                self.rcv_task = None
+            if self.ping_task :
+                self.ping_task.cancel()
+                try :
+                    await self.ping_task
+                except asyncio.CancelledError :
+                    pass
+                self.ping_task = None
+            await self.websocket.close()
+            self.websocket = None
+            self.connected = False
+        if TMP_FILES_PATH.exists() :
+            shutil.rmtree(TMP_FILES_PATH)
+
+    async def receive_loop(self) :
+        while self.websocket and self.connected :
+            try : 
+                resp = await self.websocket.recv()
+                self.handle_response(resp)
+            except Exception as e :
+                print(e)
+    
+    async def check_connection(self) :
+        while True :
+            await asyncio.sleep(5)
+            try :
+                await self.websocket.ping()
+            except websockets.ConnectionClosed :
+                self.connected = False
+                break
+    
+    def handle_response(self, resp) :
+        if not self.container :
+            return
+        resp_dict = json.loads(resp)
+        response = Response.from_dict(resp_dict)
+        with self.container :
+            match response.status :
+                case GenerationStatus.success :
+                    gen_file = response.generated_image
+                    gen_img_path = gen_file.save_to(TMP_FILES_PATH / datetime.today().strftime('%Y%m%d_%H-%M-%S'))
+                    ui.run_javascript(f"emitEvent('image-generated', {json.dumps(str(gen_img_path))})")
+                    ui.run_javascript("emitEvent('remove-cancel-btn')") # A success means no more generation is running
+                    ui.notify("Generation successful !", color="green")
+                case GenerationStatus.cancel :
+                    import numpy as np
+                    ui.notify("Generation cancelled", color="grey")
+                case GenerationStatus.error :
+                    ui.run_javascript("emitEvent('remove-cancel-btn')") # An error means no more generation is running
+                    ui.notify(f"Error during generation ({response.message})", color="red")
+
+    async def send_request(self, request : Request) :
+        await self.websocket.send(json.dumps(request.model_dump()))
+
+
+class StyleTransferApp :
     def __init__(self, api_endpoint = API_URL) :
         self.client_id = uuid.uuid4().hex
         self.api_endpoint = api_endpoint
+        self.ws_manager = WebsocketManager(api_endpoint, ui.context.client)
+        if TMP_FILES_PATH.exists() :
+            shutil.rmtree(TMP_FILES_PATH)
+
         self.menu = ParamsMenu()
         self.menu_btn = ui.button(icon='menu', on_click=self.menu.toggle).props('round color=deep-orange').classes('fixed top-4 right-4 z-50 bg-black/50 hover:bg-black/70 text-white')
-        with ui.element('div').classes('w-full h-[10vh] justify-center align-center') :
-            ui.label('Style Transfer AI').classes('text-[6vh] w-[30vw] m-auto text-center font-bold font-["Arial Black", Gadget, sans-serif]')
+        with ui.element('div').classes('w-fit h-[80px] m-auto justify-center align-center') :
+            ui.label('Style Transfer AI').classes('text-[50px] w-full h-full text-center text-transparent font-bold font-["Arial Black", Gadget, sans-serif] bg-clip-text bg-cover bg-center').style('background-image: url("/static/StyleTransfer.png")')
         with ui.row().classes('w-full justify-between') :
             with ui.card().classes('w-[49%]') : 
                 ui.label('Content image').classes('font-medium text-slate-200')
@@ -507,7 +608,7 @@ class StyleTransferApp:
                     with ui.row().classes('w-full justify-around') :
                         self.gen_btn = ui.button('Generate image', on_click=self.generate_img).classes('block m-auto')
                         self.gen_btn._props['color'] = 'deep-orange'
-                        self.cancel_btn = ui.button('Cancel generation', on_click=self.cancel_gen).classes('block m-auto')
+                        self.cancel_btn = ui.button('Cancel generation').on('click.stop', self.cancel_gen).classes('block m-auto')
                         self.cancel_btn._props['color'] = 'deep-orange'
                         self.cancel_btn.visible = False
                 self.carousel_block = ImageCarousel().classes('w-full h-[30vh]')
@@ -515,13 +616,17 @@ class StyleTransferApp:
                     self.warning = ui.textarea("Warning").classes('w-full')
                     self.warning.props("readonly")
                     ui.timer(0.5, self.check_for_warnings)
-                with ui.card().classes('w-full') :
-                    self.status_message = ui.textarea("Status").classes('w-full')
-                    self.status_message.props('readonly')
-                    self.info_message = ui.textarea("Message").classes('w-full')
-                    self.info_message.props('readonly')
         self.loading.bind_visibility_from(self.cancel_btn)
         self.blur.bind_visibility_from(self.cancel_btn)
+        if not hasattr(self, '_event_listeners') : # Prevent double listening of events
+            ui.on('remove-cancel-btn', lambda : self.cancel_btn.set_visibility(False))
+            ui.on('image-generated', lambda img_path : self.update_generated_img(img_path.args))
+            self._event_listeners = True
+
+    def update_generated_img(self, gen_img_path) :
+        gen_img_path = Path(gen_img_path)
+        self.generated_img.source = gen_img_path
+        self.carousel_block.add_image(gen_img_path)
 
     def generate_request(self) :
         content = File.from_url(self.content.source).model_dump()
@@ -532,37 +637,12 @@ class StyleTransferApp:
     async def generate_img(self) :
         request = self.generate_request()
         self.cancel_btn.visible = True
-        async with connect(self.api_endpoint, max_size=50*1024*1024) as websocket :
-            await asyncio.create_task(self.handle_request(websocket, request))
+        await asyncio.create_task(self.ws_manager.send_request(request))
 
     async def cancel_gen(self) :
         request = CancelRequest(client_id=self.client_id)
         self.cancel_btn.visible = False
-        async with connect(self.api_endpoint, max_size=50*1024*1024) as websocket :
-            await asyncio.create_task(self.handle_request(websocket, request))
-
-    async def handle_request(self, connection, request : Request) :
-        try :
-            await connection.send(json.dumps(request.model_dump()))
-            try:
-                resp = await connection.recv()
-                resp_dict = json.loads(resp)
-                response = Response.from_dict(resp_dict)
-                if response.status in (GenerationStatus.success, GenerationStatus.error) :
-                    self.cancel_btn.visible = False
-                if response.status == GenerationStatus.success :
-                    gen_file = response.generated_image
-                    gen_img_path = gen_file.save_to(TMP_FILES_PATH / datetime.today().strftime('%Y%m%d_%H-%M-%S'))
-                    self.generated_img.source = gen_img_path
-                    self.carousel_block.add_image(gen_img_path)
-                self.status_message.value = response.status
-                self.info_message.value = response.message
-            except websockets.ConnectionClosed:
-                self.generated_img.source = None
-                self.status_message.value = "Connection closed"
-                self.info_message.value = None
-        except Exception as e :
-            print(e)
+        await asyncio.create_task(self.ws_manager.send_request(request))
     
     def check_for_warnings(self) :
         warnings = ''
@@ -585,9 +665,12 @@ class StyleTransferApp:
 
 
 def main():
-    app = StyleTransferApp()
+    st_app = StyleTransferApp()
+    app.on_startup(st_app.ws_manager.connect)
+    app.on_shutdown(st_app.ws_manager.disconnect)
     ui.dark_mode(True)
     ui.run(title="StyleTransferAI", host="0.0.0.0", port=8502, reload=True)
+
 
 if __name__ in {"__main__", "__mp_main__"} :
     main()

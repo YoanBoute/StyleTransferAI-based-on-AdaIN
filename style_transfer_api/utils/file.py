@@ -28,7 +28,7 @@ class File(BaseModel) :
         return cls(
             filename = f'tmp_{datetime.now()}',
             extension = extension if extension is not None else '.jpg',
-            data = re.findall(r'base64,(.*)', file)[0]
+            data = re.findall(r'base64,([^#]*)', file)[0]
         )
     
     def save_to(self, dst_path : Path) :

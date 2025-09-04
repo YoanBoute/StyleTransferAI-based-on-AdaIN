@@ -14,11 +14,6 @@ img1 = Path('D:/StyleTransferAI/StyleTransferAI/test_images/wolf_forest.jpg')
 img2 = Path('D:/StyleTransferAI/StyleTransferAI/test_images/impressionisme.jpg')
 img3 = Path('D:/StyleTransferAI/StyleTransferAI/test_images/oil_paint.jpg')
 
-# TODO : 
-# - Create a real request function
-# - Add an authentification method (token / connection / ...)
-# - Reconnect to the Websockets every once in a while
-
 async def request_generation(connection, client_id, content_img, style_imgs, params) :
     request = Request(client_id=client_id, content_img=content_img, style_imgs=style_imgs, params=params)
     await connection.send(request.model_dump())

@@ -3,3 +3,4 @@ __pycache__
 generated_images
 tmp
 *.code-workspace
+other.py

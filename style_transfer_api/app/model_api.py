@@ -19,7 +19,6 @@ from multiprocessing import Process, Queue
 import asyncio
 import psutil
 import time
-import numpy as np
 import uuid
 from ..utils.file import File
 from ..utils.requests import Request, RequestType, Response, GenerationStatus
@@ -30,7 +29,6 @@ TMP_DIR = Path("./__tmp")
 TMP_DIR.mkdir(exist_ok=True)
 
 # TODO : 
-# - Store generated images for each client for a certain amount of days
 # - Add a function to process and secure the received parameters (remove non existing parameters)
 # - Cancel task if connection with client is lost / closed
 
@@ -121,8 +119,6 @@ async def endpoint(ws : WebSocket) :
     
     async def cancel_request(client_id, request_id) :
         await manager.cancel_task(client_id)
-        response = Response(request_id=request_id, status=GenerationStatus.cancel, message="Generation was cancelled")
-        await ws.send_text(json.dumps(response.model_dump()))
 
     await ws.accept()
     while True:
