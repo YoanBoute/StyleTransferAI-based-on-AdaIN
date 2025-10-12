@@ -117,17 +117,18 @@ async def endpoint(ws : WebSocket) :
             gen_path.unlink(missing_ok=True)
             await ws.send_text(json.dumps(response.model_dump()))
     
-    async def cancel_request(client_id, request_id) :
+    async def cancel_request(client_id) :
         await manager.cancel_task(client_id)
 
     await ws.accept()
+    client_id = uuid.uuid4().hex
     while True:
-        client_id = "unknown"
+        # client_id = "unknown"
         try :
             req = await ws.receive_text()
             req_dict = json.loads(req)
             request = Request.from_dict(req_dict)
-            client_id = request.client_id
+            # client_id = request.client_id
             request_id = request.request_id
             if request.type == RequestType.gen :
                 content = request.content_img
@@ -139,7 +140,10 @@ async def endpoint(ws : WebSocket) :
                 gen_params = request.params
                 asyncio.create_task(generation(client_id, request_id, content=content_path, styles=style_paths, params=gen_params))  
             elif request.type == RequestType.cancel :
-                asyncio.create_task(cancel_request(client_id, request_id))          
+                asyncio.create_task(cancel_request(client_id))        
+        except fastapi.WebSocketDisconnect :
+            print(ws.client)
+            break
         except Exception as e :
             response = Response(request_id=request_id, status=GenerationStatus.error, message=str(e))
             print(e)

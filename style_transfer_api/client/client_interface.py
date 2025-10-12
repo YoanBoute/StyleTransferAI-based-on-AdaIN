@@ -12,6 +12,7 @@ import base64
 from functools import partial
 from datetime import datetime
 import time
+from enum import Enum
 
 """ 
 ------------------------------------------------------
@@ -21,7 +22,7 @@ import time
 - Layout changes
     - Color the background of the warning card and change its font / make it a tooltip next to the generation button
     - Change placeholders for images
-- Link the connected state of the WS manager to a visual indicator on the interface
+- Bug : When the server is stopped after the interface was connected, infinite ping loop
 - Save the generated images on server side (only send the url to the client), and delete them once the connection is closed
 - Add all necessary warnings (including a check to see whether the server is connected)
 - Add a "Reset weights" button
@@ -29,12 +30,15 @@ import time
 - Provide a French / English translation
 - Add tooltips with information logo next to each parameter
 - Add a global description message dialog that indicates how to use the interface
-- Delete useless code files
+- Delete useless code files and import lines
 """
 
 API_URL = "ws://localhost:8000/generate"
 TMP_FILES_PATH = Path('D:/StyleTransferAI/StyleTransferAI_AdaIN/StyleTransferAI-based-on-AdaIN/style_transfer_api/tmp/')
 MAX_SIZE = 20 # Max size of images in Mb 
+MAX_CONNECTION_RETRIES = 3
+TIME_BETWEEN_CONNECTION_RETRIES = 1
+CONNECTION_TIMEOUT = 10
 
 ui.add_head_html('''
     <style>
@@ -479,25 +483,42 @@ class ParamsMenu :
         params_dict['patch_size'] = int(params_dict['patch_size'])
         params_dict['patch_context_size'] = int(params_dict['patch_context_size'])
         return params_dict
-                        
+
+
+class ConnectionStatus(str, Enum) :
+    connecting = 'connecting'
+    good = 'connection_good'
+    error = 'connection-error'
+
 
 class WebsocketManager :
     def __init__(self, api_endpoint, container):
         self.api_endpoint = api_endpoint
         self.container = container
         self.websocket = None
-        self._connecting = False
+        self.connecting = False
         self.connected = False
         self.rcv_task = None
         self.ping_task = None
 
     async def connect(self) :
-        if self._connecting :
+        if self.connecting :
             return
-        self._connecting = True
-        try :
-            self.websocket = await connect(self.api_endpoint, max_size=MAX_SIZE*1024*1024)
-            self.connected = True
+        self.connecting = True
+        ui.run_javascript(f"emitEvent('{ConnectionStatus.connecting.value}')")
+        retry_count = 0
+        while not self.connected and retry_count < MAX_CONNECTION_RETRIES :
+            try :
+                self.websocket = await connect(self.api_endpoint, max_size=MAX_SIZE*1024*1024, open_timeout=CONNECTION_TIMEOUT)
+                self.connected = True
+            except Exception as e :
+                retry_count += 1
+                if retry_count < MAX_CONNECTION_RETRIES :
+                    ui.notify(f"Connection to the server failed. Retrying in {TIME_BETWEEN_CONNECTION_RETRIES} seconds...", color="orange")
+                    await asyncio.sleep(TIME_BETWEEN_CONNECTION_RETRIES)
+
+        if self.connected :
+            ui.run_javascript(f"emitEvent('{ConnectionStatus.good.value}')")
             if self.rcv_task and not self.rcv_task.done() :
                 self.rcv_task.cancel()
                 try :
@@ -512,11 +533,11 @@ class WebsocketManager :
                 except asyncio.CancelledError :
                     pass
             self.ping_task = asyncio.create_task(self.check_connection())
-        except Exception as e :
-            ui.notify(f"Unable to connect to the model ({e})")
-            print(e)
-        finally :
-            self._connecting = False
+        else :
+            ui.run_javascript(f"emitEvent('{ConnectionStatus.error.value}')")
+            ui.notify("Unable to connect to the server, please try again later", color="red")
+        
+        self.connecting = False
     
     async def disconnect(self) :
         if self.websocket :
@@ -555,6 +576,8 @@ class WebsocketManager :
                 await self.websocket.ping()
             except websockets.ConnectionClosed :
                 self.connected = False
+                ui.run_javascript(f"emitEvent('{ConnectionStatus.error.value}')")
+                ui.notify("Connection lost, please relaunch the application", color='red')
                 break
     
     def handle_response(self, resp) :
@@ -581,6 +604,45 @@ class WebsocketManager :
         await self.websocket.send(json.dumps(request.model_dump()))
 
 
+class ConnectionStatusIndicator :
+    def __init__(self) :
+        with ui.element('div').classes('flex justify-center') as self.block :
+            with ui.element('div').tooltip('Connecting to the model') :
+                self.loading = ui.spinner(color='deep-orange', size='sm')
+            self.good = ui.icon('check_circle', color='green', size='sm').tooltip('Connection with the model established !')
+            self.error = ui.icon('error', color='red', size='sm').tooltip('The model is currently unavailable, please try again later')
+
+        self.loading.visible = False
+        self.good.visible = False
+        self.error.visible = False
+
+        ui.on(ConnectionStatus.connecting.value, lambda : self._set_visible('loading'))
+        ui.on(ConnectionStatus.good.value, lambda : self._set_visible('good'))
+        ui.on(ConnectionStatus.error.value, lambda : self._set_visible('error'))
+
+        self.block.classes('transition-all duration-300 ease-in-out')
+
+    def _set_visible(self, elem) :
+        match elem :
+            case 'loading' :
+                self.loading.visible = True
+                self.good.visible = False
+                self.error.visible = False
+            case 'good' :
+                self.good.visible = True
+                self.loading.visible = False
+                self.error.visible = False
+            case 'error' :
+                self.error.visible = True
+                self.good.visible = False
+                self.loading.visible = False
+
+
+    def classes(self, add : str = "", *, remove : str = "") :
+        self.block.classes(add=add, remove=remove)
+        return self
+    
+
 class StyleTransferApp :
     def __init__(self, api_endpoint = API_URL) :
         self.client_id = uuid.uuid4().hex
@@ -606,8 +668,10 @@ class StyleTransferApp :
                         self.loading = ui.spinner(type='bars', size='15%', color='deep-orange').classes('absolute inset-0 m-auto z-10')
                         self.blur = ui.element('div').classes('absolute inset-0 backdrop-blur-sm') # Blurs current image while a generation is in progress
                     with ui.row().classes('w-full justify-around') :
-                        self.gen_btn = ui.button('Generate image', on_click=self.generate_img).classes('block m-auto')
-                        self.gen_btn._props['color'] = 'deep-orange'
+                        with ui.row().classes('gap-1 m-auto items-center') :
+                            self.gen_btn = ui.button('Generate image', on_click=self.generate_img)
+                            self.gen_btn._props['color'] = 'deep-orange'
+                            self.connection_status = ConnectionStatusIndicator()
                         self.cancel_btn = ui.button('Cancel generation').on('click.stop', self.cancel_gen).classes('block m-auto')
                         self.cancel_btn._props['color'] = 'deep-orange'
                         self.cancel_btn.visible = False
@@ -616,6 +680,7 @@ class StyleTransferApp :
                     self.warning = ui.textarea("Warning").classes('w-full')
                     self.warning.props("readonly")
                     ui.timer(0.5, self.check_for_warnings)
+        self.gen_btn.bind_enabled_from(self.ws_manager, 'connected')
         self.loading.bind_visibility_from(self.cancel_btn)
         self.blur.bind_visibility_from(self.cancel_btn)
         if not hasattr(self, '_event_listeners') : # Prevent double listening of events
