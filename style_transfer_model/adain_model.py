@@ -14,7 +14,6 @@ import json
 import matplotlib.pyplot as plt
 import gc
 import cv2 as cv
-import h5py
 from copy import deepcopy
 
 def instance_mean(batch):

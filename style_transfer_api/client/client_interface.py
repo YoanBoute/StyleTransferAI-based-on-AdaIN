@@ -22,10 +22,10 @@ from enum import Enum
 - Layout changes
     - Color the background of the warning card and change its font / make it a tooltip next to the generation button
     - Change placeholders for images
-- Bug : When the server is stopped after the interface was connected, infinite ping loop
 - Save the generated images on server side (only send the url to the client), and delete them once the connection is closed
 - Add all necessary warnings (including a check to see whether the server is connected)
-- Add a "Reset weights" button
+- Use relative paths / specific folder (AppData for example)
+- Remove the necessity of a scrollbar
 - Handle invalid requests (missing style / content)
 - Provide a French / English translation
 - Add tooltips with information logo next to each parameter
@@ -36,33 +36,9 @@ from enum import Enum
 API_URL = "ws://localhost:8000/generate"
 TMP_FILES_PATH = Path('D:/StyleTransferAI/StyleTransferAI_AdaIN/StyleTransferAI-based-on-AdaIN/style_transfer_api/tmp/')
 MAX_SIZE = 20 # Max size of images in Mb 
-MAX_CONNECTION_RETRIES = 3
-TIME_BETWEEN_CONNECTION_RETRIES = 1
+MAX_CONNECTION_RETRIES = 5
+TIME_BETWEEN_CONNECTION_RETRIES = 10
 CONNECTION_TIMEOUT = 10
-
-ui.add_head_html('''
-    <style>
-    .q-dialog__inner {
-        padding: 0 !important;
-    }
-    .fullscreen-dialog .q-card {
-        max-width: none !important;
-        max-height: none !important;
-        width: 100% !important;
-        height: 100% !important;
-        padding: 5vh 5vw !important;
-        background: none !important;
-        box-shadow: none !important;
-        backdrop-filter: blur(5px) !important;
-    }
-    .fullscreen-dialog > .q-dialog__backdrop {
-        background: rgba(0,0,0,0.8) !important;
-    }
-    .img-contain img {
-        object-fit: contain !important;
-    }
-    </style>
-    ''')
 
 app.add_static_files('/static', '.')
 
@@ -181,10 +157,17 @@ class ImageComponent :
         if source is not None :
             self.source = source
 
-    def update_img(self, e) :
-        image_bytes = e.content.read()
+    async def update_img(self, e) :
+        try :
+            image_bytes = e.content.read()
+        except AttributeError :
+            image_bytes = await e.file.read() # For NiceGUI > 2.0
+
         encoded_image = base64.b64encode(image_bytes).decode('utf-8')
-        mime_type = e.type if e.type else 'image/jpeg'
+        try :
+            mime_type = e.type if e.type else 'image/jpeg'
+        except :
+            mime_type = e.file.type if getattr(e.file, 'type', None) is not None else 'image/jpeg' # For NiceGUI > 2.0
         base64_url = f"data:{mime_type};base64,{encoded_image}#t={time.time()}"
         self.source = base64_url
         e.sender.reset() # Clear cache to avoid problems with re-uploading the same file
@@ -358,6 +341,7 @@ class StyleBlocksRow :
         target_block.img.source = src_block.img.source
         target_block.img.close_btn.visible = src_block.img.close_btn.visible
         target_block.weight.value = src_block.weight.value
+        target_block.weight.fix_btn.value = src_block.weight.fix_btn.value
         target_block.scale.value = src_block.scale.value
 
     def add_block(self) :
@@ -505,7 +489,8 @@ class WebsocketManager :
         if self.connecting :
             return
         self.connecting = True
-        ui.run_javascript(f"emitEvent('{ConnectionStatus.connecting.value}')")
+        with self.container :
+            ui.run_javascript(f"emitEvent('{ConnectionStatus.connecting.value}')")
         retry_count = 0
         while not self.connected and retry_count < MAX_CONNECTION_RETRIES :
             try :
@@ -514,11 +499,13 @@ class WebsocketManager :
             except Exception as e :
                 retry_count += 1
                 if retry_count < MAX_CONNECTION_RETRIES :
-                    ui.notify(f"Connection to the server failed. Retrying in {TIME_BETWEEN_CONNECTION_RETRIES} seconds...", color="orange")
+                    with self.container :
+                        ui.notify(f"Connection to the server failed. Retrying in {TIME_BETWEEN_CONNECTION_RETRIES} seconds...", color="orange")
                     await asyncio.sleep(TIME_BETWEEN_CONNECTION_RETRIES)
 
         if self.connected :
-            ui.run_javascript(f"emitEvent('{ConnectionStatus.good.value}')")
+            with self.container :
+                ui.run_javascript(f"emitEvent('{ConnectionStatus.good.value}')")
             if self.rcv_task and not self.rcv_task.done() :
                 self.rcv_task.cancel()
                 try :
@@ -534,8 +521,9 @@ class WebsocketManager :
                     pass
             self.ping_task = asyncio.create_task(self.check_connection())
         else :
-            ui.run_javascript(f"emitEvent('{ConnectionStatus.error.value}')")
-            ui.notify("Unable to connect to the server, please try again later", color="red")
+            with self.container :
+                ui.run_javascript(f"emitEvent('{ConnectionStatus.error.value}')")
+                ui.notify("Unable to connect to the server, please try again later", color="red")
         
         self.connecting = False
     
@@ -558,6 +546,8 @@ class WebsocketManager :
             await self.websocket.close()
             self.websocket = None
             self.connected = False
+            with self.container :
+                ui.run_javascript(f"emitEvent('{ConnectionStatus.error.value}')")
         if TMP_FILES_PATH.exists() :
             shutil.rmtree(TMP_FILES_PATH)
 
@@ -566,8 +556,11 @@ class WebsocketManager :
             try : 
                 resp = await self.websocket.recv()
                 self.handle_response(resp)
+            except websockets.ConnectionClosed :
+                break
             except Exception as e :
                 print(e)
+                break
     
     async def check_connection(self) :
         while True :
@@ -576,8 +569,9 @@ class WebsocketManager :
                 await self.websocket.ping()
             except websockets.ConnectionClosed :
                 self.connected = False
-                ui.run_javascript(f"emitEvent('{ConnectionStatus.error.value}')")
-                ui.notify("Connection lost, please relaunch the application", color='red')
+                with self.container :
+                    ui.notify("Connection lost, please relaunch the application", color='red')
+                await self.disconnect()
                 break
     
     def handle_response(self, resp) :
@@ -594,7 +588,6 @@ class WebsocketManager :
                     ui.run_javascript("emitEvent('remove-cancel-btn')") # A success means no more generation is running
                     ui.notify("Generation successful !", color="green")
                 case GenerationStatus.cancel :
-                    import numpy as np
                     ui.notify("Generation cancelled", color="grey")
                 case GenerationStatus.error :
                     ui.run_javascript("emitEvent('remove-cancel-btn')") # An error means no more generation is running
@@ -641,7 +634,6 @@ class ConnectionStatusIndicator :
     def classes(self, add : str = "", *, remove : str = "") :
         self.block.classes(add=add, remove=remove)
         return self
-    
 
 class StyleTransferApp :
     def __init__(self, api_endpoint = API_URL) :
@@ -729,13 +721,43 @@ class StyleTransferApp :
             return 'The style weights do not sum to 1'
 
 
-def main():
-    st_app = StyleTransferApp()
-    app.on_startup(st_app.ws_manager.connect)
-    app.on_shutdown(st_app.ws_manager.disconnect)
+async def startup() :
+    global app_instance 
+    app_instance = StyleTransferApp()
+    await app_instance.ws_manager.connect()
+
+async def shutdown() :
+    await app_instance.ws_manager.disconnect()
+
+@ui.page('/')
+def index() :
+    ui.add_head_html('''
+    <style>
+    .q-dialog__inner {
+        padding: 0 !important;
+    }
+    .fullscreen-dialog .q-card {
+        max-width: none !important;
+        max-height: none !important;
+        width: 100% !important;
+        height: 100% !important;
+        padding: 5vh 5vw !important;
+        background: none !important;
+        box-shadow: none !important;
+        backdrop-filter: blur(5px) !important;
+    }
+    .fullscreen-dialog > .q-dialog__backdrop {
+        background: rgba(0,0,0,0.8) !important;
+    }
+    .img-contain img {
+        object-fit: contain !important;
+    }
+    </style>
+    ''')
     ui.dark_mode(True)
-    ui.run(title="StyleTransferAI", host="0.0.0.0", port=8502, reload=True)
 
+app.on_connect(startup)
+app.on_disconnect(shutdown)
 
-if __name__ in {"__main__", "__mp_main__"} :
-    main()
+ui.run(title="StyleTransferAI", host='127.0.0.1', port=8503, reload=False) 
+
